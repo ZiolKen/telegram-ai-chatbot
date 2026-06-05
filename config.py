@@ -11,8 +11,11 @@ WEBHOOK_URL: str    = os.getenv("WEBHOOK_URL", "")
 GEMINI_KEYS: list[str] = [
     k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()
 ]
-DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.1-flash-lite")
 MODELS: list[str] = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite-preview-06-17",
     "gemini-2.0-flash",
