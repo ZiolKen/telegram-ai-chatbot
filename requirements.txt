@@ -1,2 +1,13 @@
+# Core
 python-telegram-bot[webhooks]==21.1.1
 aiohttp==3.9.5
+
+# Web scraping & parsing
+beautifulsoup4==4.12.3
+lxml==5.2.1
+
+# Search
+duckduckgo-search==6.2.4
+
+# ArXiv
+arxiv==2.1.0
