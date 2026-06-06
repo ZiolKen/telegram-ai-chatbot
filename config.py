@@ -21,8 +21,12 @@ MAX_CONV_ROWS: int = int(os.getenv("MAX_CONV_ROWS", "10000"))
 GEMINI_KEYS: list[str] = [
     k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()
 ]
-DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-2.5-flash")
+DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.1-flash-lite")
 MODELS: list[str] = [
+    # ── Gemini 3.x ───────────────────────────────────────────────────────
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
     # ── Gemini 2.5 ───────────────────────────────────────────────────────
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite-preview-06-17",
