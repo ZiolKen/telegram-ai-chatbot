@@ -678,3 +678,82 @@ TOOL_STATUS: dict[str, str] = {
     "tg_set_chat_title":        "✏️ Đang đổi tên chat…",
     "tg_set_chat_description":  "📝 Đang cập nhật mô tả…",
 }
+
+
+# ─────────────────────────────────────────────────────────────
+# NEW: tg_send_photo  &  tg_edit_message
+# ─────────────────────────────────────────────────────────────
+TG_TOOL_DECLS.extend([
+    {
+        "name": "tg_send_photo",
+        "description": (
+            "Send a photo to a Telegram chat using a URL or file_id. "
+            "Optionally add a caption (Markdown supported)."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "photo":     {"type": "STRING", "description": "Photo URL (https://…) or Telegram file_id"},
+                "caption":   {"type": "STRING", "description": "Optional caption text (Markdown OK)"},
+                "chat_id":   {"type": "STRING", "description": "Target chat ID or @username (blank = current)"},
+                "thread_id": {"type": "NUMBER", "description": "Topic/thread ID"},
+            },
+            "required": ["photo"],
+        },
+    },
+    {
+        "name": "tg_edit_message",
+        "description": (
+            "Edit the text of a previously sent message. "
+            "The bot must be the author of the message."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "message_id": {"type": "NUMBER", "description": "ID of the message to edit"},
+                "text":       {"type": "STRING", "description": "New message text"},
+                "chat_id":    {"type": "STRING", "description": "Chat ID (default: current)"},
+            },
+            "required": ["message_id", "text"],
+        },
+    },
+])
+
+
+async def tg_send_photo(ctx: TelegramContext, photo: str,
+                        caption: str = "", chat_id=None, thread_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    thr    = int(thread_id) if thread_id else ctx.thread_id
+    try:
+        msg = await ctx.bot.send_photo(
+            chat_id           = target,
+            photo             = photo,
+            caption           = caption[:1024] if caption else None,
+            message_thread_id = thr,
+        )
+        return f"✅ Đã gửi ảnh (ID {msg.message_id}) tới {target}."
+    except Exception as e:
+        logger.error("tg_send_photo: %s", e)
+        return f"❌ Gửi ảnh thất bại: {e}"
+
+
+async def tg_edit_message(ctx: TelegramContext, message_id: int,
+                          text: str, chat_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id    = target,
+            message_id = int(message_id),
+            text       = text[:4096],
+        )
+        return f"✅ Đã sửa tin nhắn {message_id}."
+    except Exception as e:
+        logger.error("tg_edit_message: %s", e)
+        return f"❌ Sửa thất bại: {e}"
+
+
+# Register new handlers + status labels
+TG_HANDLERS["tg_send_photo"]    = tg_send_photo
+TG_HANDLERS["tg_edit_message"]  = tg_edit_message
+TOOL_STATUS["tg_send_photo"]    = "🖼️ Đang gửi ảnh…"
+TOOL_STATUS["tg_edit_message"]  = "✏️ Đang sửa tin nhắn…"

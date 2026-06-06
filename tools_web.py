@@ -1,9 +1,12 @@
 """
 Web-based tools: DuckDuckGo/Google search, URL extraction, ArXiv lookup.
 Each public function is async and returns a plain string for the LLM.
+Includes SSRF protection on fetch_url (#2).
 """
 import asyncio
+import ipaddress
 import logging
+from urllib.parse import urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -12,9 +15,7 @@ from config import GOOGLE_API_KEY, GOOGLE_CSE_ID
 
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────
-# Tool declarations (Gemini function-calling schema)
-# ─────────────────────────────────────────────────────────────
+# ── Tool declarations ─────────────────────────────────────────────────────
 WEB_TOOL_DECLS = [
     {
         "name": "web_search",
@@ -69,9 +70,49 @@ WEB_TOOL_DECLS = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────
-# Web Search
-# ─────────────────────────────────────────────────────────────
+# ── SSRF Protection (#2) ──────────────────────────────────────────────────
+_BLOCKED_RANGES = [
+    ipaddress.ip_network("127.0.0.0/8"),     # loopback
+    ipaddress.ip_network("10.0.0.0/8"),       # private
+    ipaddress.ip_network("172.16.0.0/12"),    # private
+    ipaddress.ip_network("192.168.0.0/16"),   # private
+    ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),          # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),         # IPv6 private
+]
+_BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
+
+
+def _is_safe_url(url: str) -> tuple[bool, str]:
+    """Returns (is_safe, reason)."""
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False, "URL không hợp lệ"
+
+    if p.scheme not in ("http", "https"):
+        return False, f"Scheme <code>{p.scheme}</code> không được phép, chỉ http/https"
+
+    host = (p.hostname or "").lower().rstrip(".")
+    if not host:
+        return False, "Không có hostname"
+
+    if host in _BLOCKED_HOSTNAMES:
+        return False, f"Hostname <code>{host}</code> bị chặn"
+
+    try:
+        ip = ipaddress.ip_address(host)
+        for net in _BLOCKED_RANGES:
+            if ip in net:
+                return False, f"IP <code>{host}</code> thuộc dải nội bộ bị chặn"
+    except ValueError:
+        pass  # Normal hostname — OK
+
+    return True, ""
+
+
+# ── Web Search ────────────────────────────────────────────────────────────
 async def web_search(query: str, engine: str = "duckduckgo") -> str:
     if engine == "google" and GOOGLE_API_KEY and GOOGLE_CSE_ID:
         return await _google(query)
@@ -124,9 +165,7 @@ async def _google(query: str) -> str:
         return f"Lỗi Google Search: {e}"
 
 
-# ─────────────────────────────────────────────────────────────
-# URL Fetch
-# ─────────────────────────────────────────────────────────────
+# ── URL Fetch (with SSRF protection) ─────────────────────────────────────
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) "
@@ -136,6 +175,11 @@ _HEADERS = {
 
 
 async def fetch_url(url: str) -> str:
+    # SSRF check (#2)
+    safe, reason = _is_safe_url(url)
+    if not safe:
+        return f"❌ URL bị chặn: {reason}"
+
     try:
         async with aiohttp.ClientSession(
             headers=_HEADERS,
@@ -144,13 +188,18 @@ async def fetch_url(url: str) -> str:
             async with s.get(url) as r:
                 if r.status != 200:
                     return f"Không thể tải URL (HTTP {r.status})"
-                html = await r.text(errors="replace")
 
-        soup = BeautifulSoup(html, "lxml")
+                # Block binary content types
+                ct = r.headers.get("Content-Type", "")
+                if not any(t in ct for t in ("text/", "application/json", "application/xml")):
+                    return f"❌ Content-Type <code>{ct}</code> không phải text, bỏ qua."
+
+                html_content = await r.text(errors="replace")
+
+        soup = BeautifulSoup(html_content, "lxml")
         for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
             tag.decompose()
 
-        # Try <article> or <main> first, fall back to whole body
         body = soup.find("article") or soup.find("main") or soup.body or soup
         text = "\n".join(
             line.strip() for line in body.get_text(separator="\n").splitlines()
@@ -164,9 +213,7 @@ async def fetch_url(url: str) -> str:
         return f"Lỗi tải URL: {e}"
 
 
-# ─────────────────────────────────────────────────────────────
-# ArXiv Search
-# ─────────────────────────────────────────────────────────────
+# ── ArXiv Search ─────────────────────────────────────────────────────────
 async def arxiv_search(query: str, max_results: int = 3) -> str:
     max_results = max(1, min(5, int(max_results)))
     try:

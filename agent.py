@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Callable, Optional
 
 import aiohttp
@@ -20,26 +21,37 @@ import aiohttp
 from config import DEFAULT_MODEL, GEMINI_KEYS, MODELS
 from tools_code import CODE_TOOL_DECLS, run_python
 from tools_telegram import TG_TOOL_DECLS, TG_HANDLERS, TelegramContext
-from tools_web import (
-    WEB_TOOL_DECLS,
-    arxiv_search,
-    fetch_url,
-    web_search,
-)
+from tools_web import WEB_TOOL_DECLS, arxiv_search, fetch_url, web_search
 
 logger = logging.getLogger(__name__)
 
-# ── Combined tool manifest ─────────────────────────────────────
 ALL_TOOL_DECLS = WEB_TOOL_DECLS + CODE_TOOL_DECLS + TG_TOOL_DECLS
 
-MAX_TOOL_ROUNDS = 12        # safety cap for tool-use loops
-GEMINI_TIMEOUT  = aiohttp.ClientTimeout(total=90)
+MAX_TOOL_ROUNDS      = 12
+MAX_TOOL_RESULT_CHARS = 4000   # #12 — trim tool results
+GEMINI_TIMEOUT       = aiohttp.ClientTimeout(total=90)
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
-# ─────────────────────────────────────────────────────────────
-# Low-level Gemini call
-# ─────────────────────────────────────────────────────────────
+# ── Per-key quota cooldown tracker (#11) ─────────────────────────────────
+_exhausted: dict[str, float] = {}   # "keyprefix:model" → expiry timestamp
+_QUOTA_COOLDOWN = 60.0              # seconds
+
+
+def _is_quota_ok(api_key: str, model: str) -> bool:
+    k   = f"{api_key[:12]}:{model}"
+    exp = _exhausted.get(k, 0)
+    if monotonic() < exp:
+        return False
+    _exhausted.pop(k, None)
+    return True
+
+
+def _mark_quota_exhausted(api_key: str, model: str):
+    _exhausted[f"{api_key[:12]}:{model}"] = monotonic() + _QUOTA_COOLDOWN
+
+
+# ── Low-level Gemini call ─────────────────────────────────────────────────
 async def _gemini(
     session:       aiohttp.ClientSession,
     api_key:       str,
@@ -48,7 +60,7 @@ async def _gemini(
     system_prompt: str,
     tools:         Optional[list],
 ) -> dict | None:
-    """Single Gemini API call.  Returns response dict or None on failure."""
+    """Single Gemini API call. Returns response dict or None on failure."""
     url = f"{BASE_URL}/{model}:generateContent?key={api_key}"
     payload: dict = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -68,6 +80,7 @@ async def _gemini(
                 return await r.json()
             if r.status == 429:
                 logger.warning("Rate-limit: key=%.8s model=%s", api_key, model)
+                _mark_quota_exhausted(api_key, model)   # #11
                 return None
             if r.status == 404:
                 logger.warning("Model not found: %s", model)
@@ -83,45 +96,40 @@ async def _gemini(
         return None
 
 
-# ─────────────────────────────────────────────────────────────
-# Tool dispatcher
-# ─────────────────────────────────────────────────────────────
+# ── Tool dispatcher ───────────────────────────────────────────────────────
 async def _dispatch(
-    name:    str,
-    args:    dict,
-    tg_ctx:  Optional[TelegramContext],
+    name:      str,
+    args:      dict,
+    tg_ctx:    Optional[TelegramContext],
     status_cb: Optional[Callable] = None,
 ) -> str:
     """Execute a named tool and return its string result."""
     if status_cb:
         asyncio.create_task(status_cb(name))
 
-    # Web tools
     if name == "web_search":
-        return await web_search(args.get("query", ""), args.get("engine", "duckduckgo"))
-    if name == "fetch_url":
-        return await fetch_url(args.get("url", ""))
-    if name == "arxiv_search":
-        return await arxiv_search(args.get("query", ""), args.get("max_results", 3))
-
-    # Code tool
-    if name == "run_python":
-        return await run_python(args.get("code", ""))
-
-    # Telegram tools
-    if name in TG_HANDLERS:
+        result = await web_search(args.get("query", ""), args.get("engine", "duckduckgo"))
+    elif name == "fetch_url":
+        result = await fetch_url(args.get("url", ""))
+    elif name == "arxiv_search":
+        result = await arxiv_search(args.get("query", ""), args.get("max_results", 3))
+    elif name == "run_python":
+        result = await run_python(args.get("code", ""))
+    elif name in TG_HANDLERS:
         if not tg_ctx:
             return "⚠️ Không có Telegram context."
         fn = TG_HANDLERS[name]
-        # Remove `ctx` from args dict — it is the first positional param
-        return await fn(tg_ctx, **{k: v for k, v in args.items()})
+        result = await fn(tg_ctx, **{k: v for k, v in args.items()})
+    else:
+        return f"⚠️ Tool không xác định: {name}"
 
-    return f"⚠️ Tool không xác định: {name}"
+    # Trim large results (#12)
+    if len(result) > MAX_TOOL_RESULT_CHARS:
+        result = result[:MAX_TOOL_RESULT_CHARS] + "\n…[kết quả bị cắt bớt]"
+    return result
 
 
-# ─────────────────────────────────────────────────────────────
-# Public: run the full agent loop
-# ─────────────────────────────────────────────────────────────
+# ── Main agent loop ───────────────────────────────────────────────────────
 async def run_agent(
     tg_ctx:        Optional[TelegramContext],
     user_text:     str,
@@ -129,7 +137,7 @@ async def run_agent(
     system_prompt: str,
     model:         Optional[str] = None,
     use_plugins:   bool = True,
-    status_cb:     Optional[Callable] = None,  # async fn(tool_name) → None
+    status_cb:     Optional[Callable] = None,
 ) -> str:
     """
     Drive a Gemini conversation with full multi-turn tool use.
@@ -139,7 +147,6 @@ async def run_agent(
     model_list = [preferred] + [m for m in MODELS if m != preferred]
     tools      = ALL_TOOL_DECLS if use_plugins else None
 
-    # Build initial contents
     base_contents = list(history) + [
         {"role": "user", "parts": [{"text": user_text}]}
     ]
@@ -147,6 +154,11 @@ async def run_agent(
     async with aiohttp.ClientSession(timeout=GEMINI_TIMEOUT) as session:
         for api_key in GEMINI_KEYS:
             for model_name in model_list:
+                # Skip rate-limited keys (#11)
+                if not _is_quota_ok(api_key, model_name):
+                    logger.debug("Skip exhausted: key=%.8s model=%s", api_key, model_name)
+                    continue
+
                 contents = list(base_contents)
 
                 for _round in range(MAX_TOOL_ROUNDS):
@@ -155,36 +167,32 @@ async def run_agent(
                         contents, system_prompt, tools,
                     )
                     if resp is None:
-                        break                      # try next model
+                        break       # try next model
                     if resp.get("_skip_model"):
-                        break                      # model 404 — try next
+                        break       # model 404 — try next
 
                     try:
                         candidate = resp["candidates"][0]
                         content   = candidate["content"]
                         parts     = content.get("parts", [])
                     except (KeyError, IndexError):
-                        logger.error("Unexpected Gemini response: %s",
-                                     str(resp)[:300])
+                        logger.error("Unexpected Gemini response: %s", str(resp)[:300])
                         break
 
                     fn_calls   = [p for p in parts if "functionCall" in p]
                     text_parts = [p.get("text", "") for p in parts if "text" in p]
 
                     if not fn_calls:
-                        # ── Terminal text response ──────────────────────
                         return "\n".join(text_parts).strip()
 
-                    # ── Execute all requested tools ─────────────────────
+                    # Execute all requested tools
                     fn_responses = []
                     for fc_part in fn_calls:
                         fc      = fc_part["functionCall"]
                         fn_name = fc["name"]
                         fn_args = fc.get("args") or {}
-                        logger.info("Tool call: %s(%s)", fn_name,
-                                    str(fn_args)[:120])
-                        result = await _dispatch(fn_name, fn_args,
-                                                 tg_ctx, status_cb)
+                        logger.info("Tool call: %s(%s)", fn_name, str(fn_args)[:120])
+                        result = await _dispatch(fn_name, fn_args, tg_ctx, status_cb)
                         fn_responses.append({
                             "functionResponse": {
                                 "name":     fn_name,
@@ -192,25 +200,20 @@ async def run_agent(
                             }
                         })
 
-                    # Append model's function-call turn + our results
-                    contents.append(content)        # model turn (function_call)
-                    contents.append({               # user turn  (function_result)
+                    contents.append(content)
+                    contents.append({
                         "role":  "user",
                         "parts": fn_responses,
                     })
 
-                # If we broke out of the tool loop due to an error,
-                # try the next model
     return "❌ Tất cả API key và model đều không phản hồi. Vui lòng thử lại."
 
 
-# ─────────────────────────────────────────────────────────────
-# Follow-up question generator
-# ─────────────────────────────────────────────────────────────
+# ── Follow-up question generator ─────────────────────────────────────────
 async def generate_followup(
-    history:      list[dict],
+    history:       list[dict],
     last_response: str,
-    count:        int = 3,
+    count:         int = 3,
 ) -> list[str]:
     """Generate concise follow-up questions the user might ask next."""
     prompt = (
@@ -238,15 +241,13 @@ async def generate_followup(
         return []
 
 
-# ─────────────────────────────────────────────────────────────
-# System prompt builder
-# ─────────────────────────────────────────────────────────────
+# ── System prompt builder ─────────────────────────────────────────────────
 def build_system_prompt(tg_ctx: TelegramContext) -> str:
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return f"""Bạn là một AI Agent cực kỳ mạnh mẽ hoạt động trên Telegram.
 Bạn có thể làm MỌI thứ mà một admin con người có thể làm — bao gồm gửi tin nhắn \
 tới các nhóm/kênh khác, react emoji, xóa/ghim tin nhắn, ban/mute user, \
-tạo poll, forward tin nhắn, và nhiều hơn nữa.
+tạo poll, forward tin nhắn, sửa tin nhắn, gửi ảnh và nhiều hơn nữa.
 
 ═══ THÔNG TIN PHIÊN HIỆN TẠI ═══
 🕐 Thời gian : {now}
@@ -256,23 +257,25 @@ tạo poll, forward tin nhắn, và nhiều hơn nữa.
 🧵 Thread ID : {tg_ctx.thread_id or "N/A"}
 
 ═══ CÔNG CỤ CÓ SẴN ═══
-🌐 web_search       — Tìm kiếm web (DuckDuckGo / Google)
-🔗 fetch_url        — Đọc nội dung trang web / bài báo
-📚 arxiv_search     — Tìm paper khoa học
-💻 run_python       — Chạy code Python (math, xử lý dữ liệu, v.v.)
+🌐 web_search        — Tìm kiếm web (DuckDuckGo / Google)
+🔗 fetch_url         — Đọc nội dung trang web / bài báo
+📚 arxiv_search      — Tìm paper khoa học
+💻 run_python        — Chạy code Python (math, xử lý dữ liệu, v.v.)
 
-📤 tg_send_message  — Gửi tin nhắn tới BẤT KỲ chat nào bot đang là thành viên
-😊 tg_react         — Thả emoji reaction vào tin nhắn
-🗑️ tg_delete_message— Xóa tin nhắn
-📌 tg_pin_message   — Ghim / tg_unpin_message bỏ ghim
-🚫 tg_ban_user      — Ban / tg_unban_user bỏ ban
-🔇 tg_mute_user     — Mute / tg_unmute_user bỏ mute
-↪️ tg_forward_message— Forward tin nhắn
-📋 tg_copy_message  — Copy tin nhắn (không có nhãn "Forwarded")
-📊 tg_send_poll     — Tạo poll
-ℹ️ tg_get_chat_info — Xem thông tin chat
+📤 tg_send_message   — Gửi tin nhắn tới BẤT KỲ chat nào bot đang là thành viên
+🖼️ tg_send_photo     — Gửi ảnh (URL hoặc file_id) kèm caption tuỳ chọn
+✏️ tg_edit_message   — Sửa nội dung tin nhắn đã gửi
+😊 tg_react          — Thả emoji reaction vào tin nhắn
+🗑️ tg_delete_message — Xóa tin nhắn
+📌 tg_pin_message    — Ghim / tg_unpin_message bỏ ghim
+🚫 tg_ban_user       — Ban / tg_unban_user bỏ ban
+🔇 tg_mute_user      — Mute / tg_unmute_user bỏ mute
+↪️ tg_forward_message — Forward tin nhắn
+📋 tg_copy_message   — Copy tin nhắn (không có nhãn "Forwarded")
+📊 tg_send_poll      — Tạo poll
+ℹ️ tg_get_chat_info  — Xem thông tin chat
 👥 tg_get_chat_members_count — Đếm thành viên
-🎲 tg_send_dice     — Tung xúc xắc / game emoji
+🎲 tg_send_dice      — Tung xúc xắc / game emoji
 👑 tg_promote_admin / tg_demote_admin — Cấp/thu quyền admin
 ✏️ tg_set_chat_title / tg_set_chat_description — Chỉnh sửa chat
 
