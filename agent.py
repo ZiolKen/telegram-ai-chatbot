@@ -262,9 +262,11 @@ tạo poll, forward tin nhắn, sửa tin nhắn, gửi ảnh và nhiều hơn n
 📚 arxiv_search      — Tìm paper khoa học
 💻 run_python        — Chạy code Python (math, xử lý dữ liệu, v.v.)
 
-📤 tg_send_message   — Gửi tin nhắn tới BẤT KỲ chat nào bot đang là thành viên
-🖼️ tg_send_photo     — Gửi ảnh (URL hoặc file_id) kèm caption tuỳ chọn
-✏️ tg_edit_message   — Sửa nội dung tin nhắn đã gửi
+📤 tg_send_message   — Gửi tin nhắn; parse_mode='HTML' để embed link, bold, italic
+🖼️ tg_send_photo     — Gửi ảnh (URL hoặc file_id) kèm caption HTML tuỳ chọn
+🎭 tg_send_sticker   — Gửi sticker (file_id hoặc URL file .webp/.tgs/.webm)
+🎬 tg_send_animation — Gửi GIF / animation (file_id hoặc URL .gif/.mp4)
+✏️ tg_edit_message   — Sửa tin nhắn đã gửi; hỗ trợ parse_mode='HTML'
 😊 tg_react          — Thả emoji reaction vào tin nhắn
 🗑️ tg_delete_message — Xóa tin nhắn
 📌 tg_pin_message    — Ghim / tg_unpin_message bỏ ghim
@@ -284,4 +286,6 @@ tạo poll, forward tin nhắn, sửa tin nhắn, gửi ảnh và nhiều hơn n
 • Trả lời ngắn gọn, súc tích. Dùng Markdown khi phù hợp.
 • Khi thực hiện hành động Telegram, hãy báo cáo kết quả.
 • Mặc định chat_id là chat hiện tại ({tg_ctx.chat_id}) nếu không chỉ định.
-• Có thể gọi nhiều tool trong một lượt nếu cần."""
+• Có thể gọi nhiều tool trong một lượt nếu cần.
+• Để nhúng link vào text: dùng tg_send_message với parse_mode='HTML' và cú pháp <a href="URL">text hiển thị</a>.
+• Khi gửi sticker/GIF: ưu tiên dùng file_id (lấy từ tin nhắn user đã gửi) hoặc URL trực tiếp của file media."""

@@ -1,19 +1,12 @@
 """
 db.py — Async PostgreSQL persistence layer (asyncpg).
 
-Schema
-------
-  bot_config    : key-value store for topic_mode and conv_cfg settings
-  conversations : individual message turns, auto-pruned when storage is tight
+Supports Aiven, Render, Supabase, Neon, and any standard Postgres provider.
 
-Design goals
-------------
-  • Bot works fully in-memory if DATABASE_URL is not set or DB is unreachable.
-  • All DB writes are fire-and-forget (never block the message handler).
-  • Conversations table behaves like a circular RAM buffer:
-      when total rows hit MAX_CONV_ROWS, the oldest rows are deleted first.
-  • On hard storage errors (disk full / quota), an emergency prune reclaims
-      ≥20 % of rows before retrying the failed insert.
+Key fix: asyncpg does NOT parse ?sslmode=require from the DSN — the param is
+silently ignored, causing connection failures on SSL-required hosts (Aiven, etc).
+This module strips SSL-related query params from the URL and passes a proper
+ssl.SSLContext to create_pool() instead.
 """
 
 from __future__ import annotations
@@ -21,21 +14,79 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import ssl
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import asyncpg
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level pool (None = not connected) ─────────────────────────────────
 _pool: asyncpg.Pool | None = None
-
-# ── Knobs ─────────────────────────────────────────────────────────────────────
-# Default row budget for conversations table.
-# Override with env var MAX_CONV_ROWS (set in config.py, passed in via init()).
 _MAX_CONV_ROWS: int = 10_000
-_PRUNE_BATCH:   int = 300      # rows deleted in a normal prune pass
-_PRUNE_EMERG:   float = 0.20   # fraction deleted in an emergency prune
+_PRUNE_BATCH:   int = 300
+_PRUNE_EMERG:  float = 0.20
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# URL + SSL parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_dsn(raw_url: str) -> tuple[str, dict]:
+    """
+    Split a DATABASE_URL into (clean_dsn, asyncpg_kwargs).
+
+    asyncpg cannot handle these query-string parameters:
+      • sslmode  — must become ssl=<SSLContext>
+      • sslcert / sslkey / sslrootcert / sslpassword — unused here
+
+    SSL behaviour by sslmode value
+    ──────────────────────────────
+      disable               → no SSL (default)
+      allow / prefer        → SSL with CERT_NONE  (accepts self-signed)
+      require               → SSL with CERT_NONE  (Aiven / most hosted DBs)
+      verify-ca             → SSL with system CA bundle (strict)
+      verify-full           → SSL with system CA bundle + hostname check (strict)
+
+    Aiven gives ?sslmode=require with a self-signed CA, so CERT_NONE is correct
+    unless the user also provides the CA cert via AIVEN_CA_CERT env var.
+    """
+    # Normalise postgres:// → postgresql:// (asyncpg requirement)
+    raw_url = raw_url.replace("postgres://", "postgresql://", 1)
+
+    parsed = urlparse(raw_url)
+    params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+
+    sslmode = params.pop("sslmode", "disable").lower()
+    for key in ("sslcert", "sslkey", "sslrootcert", "sslpassword"):
+        params.pop(key, None)
+
+    new_query = urlencode(params)
+    clean_dsn = urlunparse(parsed._replace(query=new_query))
+
+    kwargs: dict = {}
+
+    if sslmode == "disable":
+        pass  # no ssl kwarg
+
+    elif sslmode in ("allow", "prefer", "require"):
+        # Most hosted providers (Aiven, Railway, Fly.io) use self-signed certs
+        # behind their own CA — CERT_NONE accepts them without the CA file.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode    = ssl.CERT_NONE
+        kwargs["ssl"] = ctx
+        logger.debug("[db] SSL mode=%s → CERT_NONE context", sslmode)
+
+    elif sslmode in ("verify-ca", "verify-full"):
+        # Full verification against system CA bundle
+        ctx = ssl.create_default_context()
+        if sslmode == "verify-ca":
+            ctx.check_hostname = False
+        kwargs["ssl"] = ctx
+        logger.debug("[db] SSL mode=%s → strict context", sslmode)
+
+    return clean_dsn, kwargs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -45,8 +96,8 @@ _PRUNE_EMERG:   float = 0.20   # fraction deleted in an emergency prune
 async def init(database_url: str, max_conv_rows: int = 10_000) -> None:
     """
     Create the connection pool and ensure the schema exists.
-    Call once at startup (via PTB post_init hook).
-    Safe to call with an empty DATABASE_URL — bot will run without persistence.
+    Called once at startup via PTB post_init hook.
+    Safe with an empty DATABASE_URL — bot runs in-memory only.
     """
     global _pool, _MAX_CONV_ROWS
 
@@ -56,25 +107,43 @@ async def init(database_url: str, max_conv_rows: int = 10_000) -> None:
         logger.warning("[db] DATABASE_URL not set — running in-memory only.")
         return
 
-    # Render (and some others) give postgres:// — asyncpg needs postgresql://
-    url = database_url.replace("postgres://", "postgresql://", 1)
+    clean_dsn, ssl_kwargs = _parse_dsn(database_url)
 
     try:
-        _pool = await asyncpg.create_pool(
-            url,
-            min_size        = 1,
-            max_size        = 5,        # safe for Render free tier (max 97 conns)
-            command_timeout = 10,       # seconds per SQL command
+        # Wrap in wait_for so a network failure doesn't hang startup forever
+        _pool = await asyncio.wait_for(
+            asyncpg.create_pool(
+                clean_dsn,
+                min_size        = 1,
+                max_size        = 5,
+                command_timeout = 10,   # per-query timeout (seconds)
+                **ssl_kwargs,
+            ),
+            timeout = 20,              # total startup timeout
         )
         await _create_schema()
         logger.info("[db] PostgreSQL connected — max_conv_rows=%d", _MAX_CONV_ROWS)
+
+    except asyncio.TimeoutError:
+        logger.error(
+            "[db] Connection timed out after 20 s. "
+            "Check host/port and that the DB allows external connections."
+        )
+        _pool = None
+
+    except ssl.SSLError as exc:
+        logger.error(
+            "[db] SSL handshake failed: %s. "
+            "Ensure DATABASE_URL contains ?sslmode=require for Aiven.", exc
+        )
+        _pool = None
+
     except Exception as exc:
         logger.error("[db] Connection failed: %s — running in-memory only.", exc)
         _pool = None
 
 
 async def close() -> None:
-    """Gracefully close the connection pool at shutdown."""
     global _pool
     if _pool:
         await _pool.close()
@@ -83,7 +152,6 @@ async def close() -> None:
 
 
 def is_ready() -> bool:
-    """True when a live pool exists."""
     return _pool is not None
 
 
@@ -93,7 +161,6 @@ def is_ready() -> bool:
 
 async def _create_schema() -> None:
     async with _pool.acquire() as conn:
-        # Key-value table for settings (topic_mode, conv_cfg)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS bot_config (
                 key        TEXT PRIMARY KEY,
@@ -101,8 +168,6 @@ async def _create_schema() -> None:
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-
-        # Conversation messages table
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id         BIGSERIAL   PRIMARY KEY,
@@ -112,12 +177,10 @@ async def _create_schema() -> None:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_conv_conv_id
             ON conversations (conv_id)
         """)
-
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_conv_id_asc
             ON conversations (id ASC)
@@ -129,27 +192,20 @@ async def _create_schema() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _is_storage_error(exc: Exception) -> bool:
-    """Heuristic: detect disk-full / quota-exceeded Postgres errors."""
     msg = str(exc).lower()
     return any(kw in msg for kw in (
         "no space left", "disk full", "out of disk", "storage quota",
-        "could not extend", "file too large",
-        # Render-specific
-        "no space", "disk quota exceeded",
+        "could not extend", "file too large", "no space", "disk quota exceeded",
     ))
 
 
 async def _prune_oldest(conn: asyncpg.Connection, n: int) -> int:
-    """Delete the *n* oldest rows from conversations. Returns rows deleted."""
     result = await conn.execute("""
         DELETE FROM conversations
         WHERE id IN (
-            SELECT id FROM conversations
-            ORDER BY id ASC
-            LIMIT $1
+            SELECT id FROM conversations ORDER BY id ASC LIMIT $1
         )
     """, n)
-    # asyncpg returns e.g. "DELETE 300"
     try:
         return int(result.split()[-1])
     except (IndexError, ValueError):
@@ -157,10 +213,6 @@ async def _prune_oldest(conn: asyncpg.Connection, n: int) -> int:
 
 
 async def _maybe_prune(conn: asyncpg.Connection) -> None:
-    """
-    If the table has reached MAX_CONV_ROWS, delete the oldest PRUNE_BATCH rows
-    to make room — keeps the table from growing forever.
-    """
     total: int = await conn.fetchval("SELECT COUNT(*) FROM conversations")
     if total >= _MAX_CONV_ROWS:
         deleted = await _prune_oldest(conn, _PRUNE_BATCH)
@@ -169,10 +221,6 @@ async def _maybe_prune(conn: asyncpg.Connection) -> None:
 
 
 async def _emergency_prune(conn: asyncpg.Connection) -> None:
-    """
-    Storage pressure detected — delete at least 20 % of rows to reclaim space.
-    Called after a storage-error INSERT fails; we then retry the INSERT.
-    """
     total: int = await conn.fetchval("SELECT COUNT(*) FROM conversations")
     n = max(_PRUNE_BATCH, int(total * _PRUNE_EMERG))
     deleted = await _prune_oldest(conn, n)
@@ -180,15 +228,10 @@ async def _emergency_prune(conn: asyncpg.Connection) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# bot_config  CRUD
+# bot_config CRUD
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def config_get_all() -> dict[str, Any]:
-    """
-    Load every row from bot_config.
-    Returns {} on error or when DB is not ready.
-    Used at startup only.
-    """
     if not _pool:
         return {}
     try:
@@ -201,7 +244,6 @@ async def config_get_all() -> dict[str, Any]:
 
 
 async def config_set(key: str, value: Any) -> None:
-    """Upsert a single key in bot_config."""
     if not _pool:
         return
     try:
@@ -210,8 +252,7 @@ async def config_set(key: str, value: Any) -> None:
                 INSERT INTO bot_config (key, value, updated_at)
                 VALUES ($1, $2::jsonb, NOW())
                 ON CONFLICT (key) DO UPDATE
-                    SET value      = EXCLUDED.value,
-                        updated_at = NOW()
+                    SET value = EXCLUDED.value, updated_at = NOW()
             """, key, json.dumps(value, ensure_ascii=False))
     except Exception as exc:
         logger.error("[db] config_set(%s): %s", key, exc)
@@ -228,34 +269,26 @@ async def config_delete(key: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# conversations  CRUD
+# conversations CRUD
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def conv_load_all(max_per_conv: int) -> dict[str, list[dict]]:
-    """
-    Load the most-recent *max_per_conv* messages for every conv_id.
-    Returns { conv_id: [{"role": ..., "parts": [{"text": ...}]}, ...] }.
-    Called once at startup to restore in-memory state.
-    """
     if not _pool:
         return {}
     try:
         async with _pool.acquire() as conn:
-            # Distinct conv_ids present in the table
-            id_rows = await conn.fetch(
-                "SELECT DISTINCT conv_id FROM conversations"
-            )
+            id_rows = await conn.fetch("SELECT DISTINCT conv_id FROM conversations")
             result: dict[str, list[dict]] = {}
             for row in id_rows:
-                cid = row["conv_id"]
+                cid      = row["conv_id"]
                 msg_rows = await conn.fetch("""
                     SELECT role, content
                     FROM (
                         SELECT id, role, content
-                        FROM conversations
-                        WHERE conv_id = $1
-                        ORDER BY id DESC
-                        LIMIT $2
+                        FROM   conversations
+                        WHERE  conv_id = $1
+                        ORDER  BY id DESC
+                        LIMIT  $2
                     ) sub
                     ORDER BY id ASC
                 """, cid, max_per_conv)
@@ -271,11 +304,6 @@ async def conv_load_all(max_per_conv: int) -> dict[str, list[dict]]:
 
 
 async def conv_push(conv_id: str, role: str, content: str) -> None:
-    """
-    Insert a message row.
-    • Pruning check runs before every insert (deletes oldest rows when full).
-    • On a storage error the insert is retried once after an emergency prune.
-    """
     if not _pool:
         return
     try:
@@ -287,7 +315,7 @@ async def conv_push(conv_id: str, role: str, content: str) -> None:
             )
     except asyncpg.PostgresError as exc:
         if _is_storage_error(exc):
-            logger.warning("[db] Storage pressure on conv_push — emergency prune + retry.")
+            logger.warning("[db] Storage pressure — emergency prune + retry.")
             try:
                 async with _pool.acquire() as conn:
                     await _emergency_prune(conn)
@@ -304,20 +332,16 @@ async def conv_push(conv_id: str, role: str, content: str) -> None:
 
 
 async def conv_delete(conv_id: str) -> None:
-    """Delete all messages belonging to *conv_id*."""
     if not _pool:
         return
     try:
         async with _pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM conversations WHERE conv_id = $1", conv_id
-            )
+            await conn.execute("DELETE FROM conversations WHERE conv_id = $1", conv_id)
     except Exception as exc:
         logger.error("[db] conv_delete(%s): %s", conv_id, exc)
 
 
 async def conv_delete_all() -> None:
-    """Truncate the entire conversations table (used by /sysreset)."""
     if not _pool:
         return
     try:
@@ -333,10 +357,6 @@ async def conv_delete_all() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def stats() -> dict:
-    """
-    Return a dict with DB stats for the /status command.
-    Keys: ready, conv_rows, config_rows, max_conv_rows
-    """
     if not _pool:
         return {"ready": False}
     try:

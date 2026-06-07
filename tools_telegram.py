@@ -52,17 +52,19 @@ TG_TOOL_DECLS = [
     {
         "name": "tg_send_message",
         "description": (
-            "Send a Telegram message to any chat, group, or channel the bot "
-            "is a member of. Omit chat_id to send in the current chat. "
-            "Supports Markdown formatting."
+            "Send a text message. parse_mode='HTML' enables formatting and "
+            "inline clickable links: <a href='URL'>link text</a>. "
+            "Also supports <b>bold</b>, <i>italic</i>, <code>code</code>. "
+            "Leave parse_mode empty for plain text with no special rendering."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "text":         {"type": "STRING", "description": "Message text (Markdown OK)"},
-                "chat_id":      {"type": "STRING", "description": "Target chat ID or @username (blank = current chat)"},
-                "reply_to_id":  {"type": "NUMBER", "description": "Message ID to reply to"},
-                "thread_id":    {"type": "NUMBER", "description": "Topic/thread ID"},
+                "text":        {"type": "STRING", "description": "Message text"},
+                "parse_mode":  {"type": "STRING", "description": "HTML to enable links/formatting, empty for plain text"},
+                "chat_id":     {"type": "STRING", "description": "Target chat ID or @username (blank = current chat)"},
+                "reply_to_id": {"type": "NUMBER", "description": "Message ID to reply to"},
+                "thread_id":   {"type": "NUMBER", "description": "Topic/thread ID"},
             },
             "required": ["text"],
         },
@@ -310,15 +312,18 @@ TG_TOOL_DECLS = [
 # Tool implementations
 # ─────────────────────────────────────────────────────────────
 async def tg_send_message(ctx: TelegramContext, text: str, chat_id=None,
-                          reply_to_id=None, thread_id=None) -> str:
+                          reply_to_id=None, thread_id=None,
+                          parse_mode: str = "") -> str:
     target = _resolve_chat(ctx, chat_id)
     thr    = int(thread_id) if thread_id else ctx.thread_id
+    pm     = parse_mode.strip() or None   # None = plain text
     try:
         msg = await ctx.bot.send_message(
-            chat_id               = target,
-            text                  = text[:4096],
-            message_thread_id     = thr,
-            reply_to_message_id   = int(reply_to_id) if reply_to_id else None,
+            chat_id             = target,
+            text                = text[:4096],
+            parse_mode          = pm,
+            message_thread_id   = thr,
+            reply_to_message_id = int(reply_to_id) if reply_to_id else None,
         )
         return f"✅ Đã gửi tin nhắn (ID {msg.message_id}) tới {target}."
     except Exception as e:
@@ -729,6 +734,7 @@ async def tg_send_photo(ctx: TelegramContext, photo: str,
             chat_id           = target,
             photo             = photo,
             caption           = caption[:1024] if caption else None,
+            parse_mode        = "HTML" if caption else None,
             message_thread_id = thr,
         )
         return f"✅ Đã gửi ảnh (ID {msg.message_id}) tới {target}."
@@ -738,13 +744,16 @@ async def tg_send_photo(ctx: TelegramContext, photo: str,
 
 
 async def tg_edit_message(ctx: TelegramContext, message_id: int,
-                          text: str, chat_id=None) -> str:
+                          text: str, chat_id=None,
+                          parse_mode: str = "") -> str:
     target = _resolve_chat(ctx, chat_id)
+    pm     = parse_mode.strip() or None
     try:
         await ctx.bot.edit_message_text(
             chat_id    = target,
             message_id = int(message_id),
             text       = text[:4096],
+            parse_mode = pm,
         )
         return f"✅ Đã sửa tin nhắn {message_id}."
     except Exception as e:
@@ -757,3 +766,91 @@ TG_HANDLERS["tg_send_photo"]    = tg_send_photo
 TG_HANDLERS["tg_edit_message"]  = tg_edit_message
 TOOL_STATUS["tg_send_photo"]    = "🖼️ Đang gửi ảnh…"
 TOOL_STATUS["tg_edit_message"]  = "✏️ Đang sửa tin nhắn…"
+
+
+# ─────────────────────────────────────────────────────────────
+# NEW: tg_send_sticker  &  tg_send_animation
+# ─────────────────────────────────────────────────────────────
+TG_TOOL_DECLS.extend([
+    {
+        "name": "tg_send_sticker",
+        "description": (
+            "Send a sticker to a Telegram chat. "
+            "Pass a Telegram file_id (from any sticker the bot has seen) "
+            "or a public URL to a .webp / .tgs / .webm file."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "sticker":     {"type": "STRING", "description": "Sticker file_id or .webp/.tgs URL"},
+                "chat_id":     {"type": "STRING", "description": "Target chat ID or @username (blank = current)"},
+                "reply_to_id": {"type": "NUMBER", "description": "Message ID to reply to"},
+                "thread_id":   {"type": "NUMBER", "description": "Topic/thread ID"},
+            },
+            "required": ["sticker"],
+        },
+    },
+    {
+        "name": "tg_send_animation",
+        "description": (
+            "Send a GIF or video animation to a Telegram chat. "
+            "Pass a Telegram file_id or a public URL to a .gif / .mp4 file. "
+            "Optional caption supports HTML formatting."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "animation":   {"type": "STRING", "description": "GIF file_id or .gif/.mp4 URL"},
+                "caption":     {"type": "STRING", "description": "Optional caption (HTML OK: <b>, <a href=...>, etc.)"},
+                "chat_id":     {"type": "STRING", "description": "Target chat ID or @username (blank = current)"},
+                "reply_to_id": {"type": "NUMBER", "description": "Message ID to reply to"},
+                "thread_id":   {"type": "NUMBER", "description": "Topic/thread ID"},
+            },
+            "required": ["animation"],
+        },
+    },
+])
+
+
+async def tg_send_sticker(ctx: TelegramContext, sticker: str,
+                          chat_id=None, reply_to_id=None, thread_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    thr    = int(thread_id) if thread_id else ctx.thread_id
+    try:
+        msg = await ctx.bot.send_sticker(
+            chat_id             = target,
+            sticker             = sticker,
+            message_thread_id   = thr,
+            reply_to_message_id = int(reply_to_id) if reply_to_id else None,
+        )
+        return f"✅ Đã gửi sticker (ID {msg.message_id}) tới {target}."
+    except Exception as e:
+        logger.error("tg_send_sticker: %s", e)
+        return f"❌ Gửi sticker thất bại: {e}"
+
+
+async def tg_send_animation(ctx: TelegramContext, animation: str,
+                            caption: str = "", chat_id=None,
+                            reply_to_id=None, thread_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    thr    = int(thread_id) if thread_id else ctx.thread_id
+    try:
+        msg = await ctx.bot.send_animation(
+            chat_id             = target,
+            animation           = animation,
+            caption             = caption[:1024] if caption else None,
+            parse_mode          = "HTML" if caption else None,
+            message_thread_id   = thr,
+            reply_to_message_id = int(reply_to_id) if reply_to_id else None,
+        )
+        return f"✅ Đã gửi animation/GIF (ID {msg.message_id}) tới {target}."
+    except Exception as e:
+        logger.error("tg_send_animation: %s", e)
+        return f"❌ Gửi animation thất bại: {e}"
+
+
+# Register handlers + status labels
+TG_HANDLERS["tg_send_sticker"]   = tg_send_sticker
+TG_HANDLERS["tg_send_animation"] = tg_send_animation
+TOOL_STATUS["tg_send_sticker"]   = "🎭 Đang gửi sticker…"
+TOOL_STATUS["tg_send_animation"] = "🎬 Đang gửi animation/GIF…"
