@@ -5,19 +5,24 @@ Startup sequence (webhook mode)
 ────────────────────────────────
   1. aiohttp web server starts IMMEDIATELY on PORT
      → Render health check passes right away
-  2. PTB Application initialises (verifies bot token)
-     → post_init fires → db.init() + state.load_all_async()
-  3. Webhook is registered with Telegram
-  4. Bot begins accepting updates
+  2. PTB Application initialises — built with .updater(None) so
+     app.initialize() doesn't block in updater.initialize()
+  3. post_init fires → schedules db.init() as background task
+     (health endpoint stays responsive the whole time)
+  4. Webhook registered → bot accepts messages
+  5. DB connects, state loaded — fully ready
 
-This order is intentional: if db.init() is slow (Aiven cold-start,
-retry backoff), the health endpoint still returns 200 while the DB
-is being connected in the background.
+Root cause of "initialising…" forever
+───────────────────────────────────────
+  PTB's default builder attaches an Updater (designed for long-polling).
+  In custom webhook mode, updater.initialize() calls Telegram's getUpdates
+  or related APIs and hangs indefinitely.  post_init sits behind it and
+  never fires — db.init() is never called — health shows "initialising…".
+  Fix: .updater(None) when WEBHOOK_URL is set.
 """
 
 import asyncio
 import logging
-import os
 
 from aiohttp import web
 from telegram import Update
@@ -50,31 +55,37 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DB initialisation — runs as background asyncio task
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _init_db_background() -> None:
+    """
+    Connect to Postgres and load state.
+    Scheduled as a background task so it never blocks app.initialize()
+    or the webhook server.  Messages arriving before this completes are
+    handled normally — state.push() is safe when pool is None.
+    """
+    logger.info("[startup] DB init → DATABASE_URL %s",
+                "SET ✓" if DATABASE_URL else "NOT SET ✗  (in-memory only)")
+    await db.init(DATABASE_URL, max_conv_rows=MAX_CONV_ROWS)
+    await state.load_all_async()
+    logger.info("[startup] DB init complete — db_ready=%s", db.is_ready())
+    if not db.is_ready():
+        logger.warning("[startup] DB offline: %s", db.last_error() or "unknown")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PTB lifecycle hooks
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _on_startup(app: Application) -> None:
-    """PTB post_init hook — init DB then load state."""
-    logger.info("=== BOT STARTUP ===")
-    logger.info("OWNER_ID      : %d", OWNER_ID)
-    logger.info("DATABASE_URL  : %s",
-                "SET ✓" if DATABASE_URL else "NOT SET ✗  (running in-memory only)")
-    logger.info("WEBHOOK_URL   : %s", WEBHOOK_URL or "(polling mode)")
-
-    await db.init(DATABASE_URL, max_conv_rows=MAX_CONV_ROWS)
-    await state.load_all_async()
-
-    logger.info(
-        "=== STARTUP COMPLETE — db_ready=%s ===",
-        db.is_ready(),
-    )
-    if not db.is_ready():
-        err = db.last_error()
-        logger.warning("DB offline reason: %s", err or "unknown")
+    """PTB post_init — returns immediately, DB runs in background."""
+    logger.info("[startup] post_init fired ✓")
+    asyncio.create_task(_init_db_background())
 
 
 async def _on_shutdown(app: Application) -> None:
-    """PTB post_shutdown hook — close DB pool."""
+    """PTB post_shutdown — close DB pool."""
     await db.close()
 
 
@@ -83,14 +94,23 @@ async def _on_shutdown(app: Application) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_application() -> Application:
-    app = (
+    builder = (
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(_on_startup)
         .post_shutdown(_on_shutdown)
-        .build()
     )
 
+    if WEBHOOK_URL:
+        # KEY FIX: disable the Updater in webhook mode.
+        # Without this, updater.initialize() hangs → post_init never fires.
+        # Polling mode (local dev) omits this — it still needs the Updater.
+        builder = builder.updater(None)
+
+    return builder.build()
+
+
+def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("help",     cmd_help))
     app.add_handler(CommandHandler("reset",    cmd_reset))
@@ -100,25 +120,21 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("plugins",  cmd_plugins))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("topic",    cmd_topic))
-
     app.add_handler(MessageHandler(
         (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
         handle_message,
     ))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    return app
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Webhook mode  (Render / cloud)
+# Webhook mode
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def run_webhook(app: Application) -> None:
     path     = f"/{BOT_TOKEN}"
     full_url = f"{WEBHOOK_URL.rstrip('/')}{path}"
 
-    # ── aiohttp handlers ─────────────────────────────────────────────────
     async def tg_handler(request: web.Request) -> web.Response:
         if WEBHOOK_SECRET:
             token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -134,10 +150,6 @@ async def run_webhook(app: Application) -> None:
         return web.Response(text="OK")
 
     async def health(request: web.Request) -> web.Response:
-        """
-        Health endpoint — returns 200 always so Render marks deploy as live.
-        Shows DB status + last error so you can diagnose from the browser.
-        """
         db_ready = db.is_ready()
         err      = db.last_error()
         if db_ready:
@@ -147,42 +159,42 @@ async def run_webhook(app: Application) -> None:
         else:
             db_status = "initialising…"
 
-        lines = [
+        return web.Response(text="\n".join([
             "🤖 Bot is running",
             f"DB : {db_status}",
             f"ENV: DATABASE_URL={'SET' if DATABASE_URL else 'NOT SET'}",
-        ]
-        return web.Response(text="\n".join(lines))
+        ]))
 
-    # ── FIX: Start web server FIRST so Render health check passes ─────────
-    # db.init() can take up to 20 s × 3 retries = 60 s worst case.
-    # Starting the server first prevents Render from killing the process.
-    aio    = web.Application()
+    # ── 1. Web server starts FIRST — Render health check passes now ───────
+    aio = web.Application()
     aio.router.add_get("/",   health)
     aio.router.add_post(path, tg_handler)
 
     runner = web.AppRunner(aio)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
-    logger.info("✓ Web server listening on 0.0.0.0:%d", PORT)
-    logger.info("  Health : http://localhost:%d/", PORT)
+    logger.info("[startup] Web server up on port %d ✓", PORT)
 
-    # ── Now initialise PTB (triggers post_init → db.init) ─────────────────
-    await app.initialize()   # post_init → _on_startup → db.init + state.load_all_async
+    # ── 2. Init PTB — fast because .updater(None) skips updater init ─────
+    #   post_init fires here → schedules _init_db_background as task
+    await app.initialize()
     await app.start()
+
+    # ── 3. Register webhook ───────────────────────────────────────────────
     await app.bot.set_webhook(
         url                  = full_url,
         allowed_updates      = Update.ALL_TYPES,
         drop_pending_updates = True,
         secret_token         = WEBHOOK_SECRET or None,
     )
-    logger.info("✓ Webhook registered: %s", full_url)
+    logger.info("[startup] Webhook set ✓  %s", full_url)
+    logger.info("[startup] Bot ready — waiting for messages")
 
     try:
-        await asyncio.Event().wait()   # run forever
+        await asyncio.Event().wait()
     finally:
         await app.stop()
-        await app.shutdown()           # post_shutdown → db.close
+        await app.shutdown()
         await runner.cleanup()
 
 
@@ -191,30 +203,27 @@ async def run_webhook(app: Application) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Hard checks — these must be set or the bot is completely broken
     missing = [k for k, v in {
         "BOT_TOKEN":   BOT_TOKEN,
         "OWNER_ID":    OWNER_ID,
         "GEMINI_KEYS": GEMINI_KEYS,
     }.items() if not v]
-
     if missing:
         for k in missing:
-            logger.error("REQUIRED env var %s is not set.", k)
+            logger.error("REQUIRED env var not set: %s", k)
         return
 
-    # Soft warning — bot works without DB, just no persistence
     if not DATABASE_URL:
         logger.warning(
-            "DATABASE_URL is not set.\n"
-            "  Bot will work but conversation history will be lost on restart.\n"
-            "  Add DATABASE_URL to your Render environment variables."
+            "DATABASE_URL not set — history lost on restart.\n"
+            "Add DATABASE_URL to Render env vars (Aiven connection string)."
         )
 
     application = build_application()
+    _register_handlers(application)
 
     if WEBHOOK_URL:
-        logger.info("Mode: Webhook -> %s", WEBHOOK_URL)
+        logger.info("Mode: Webhook → %s", WEBHOOK_URL)
         asyncio.run(run_webhook(application))
     else:
         logger.info("Mode: Polling (local dev)")
