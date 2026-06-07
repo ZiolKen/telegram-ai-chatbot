@@ -3,10 +3,13 @@ db.py — Async PostgreSQL persistence layer (asyncpg).
 
 Supports Aiven, Render, Supabase, Neon, and any standard Postgres provider.
 
-Key fix: asyncpg does NOT parse ?sslmode=require from the DSN — the param is
-silently ignored, causing connection failures on SSL-required hosts (Aiven, etc).
-This module strips SSL-related query params from the URL and passes a proper
-ssl.SSLContext to create_pool() instead.
+Key fixes vs original:
+  • asyncpg silently ignores ?sslmode= in the DSN — we strip it and pass a
+    proper ssl.SSLContext instead.
+  • Auto-detects Aiven hostnames and forces sslmode=require even when the
+    caller forgets to include it in the URL.
+  • Stores _last_error so the health endpoint / /status can surface it.
+  • Retries the pool creation up to 3 times with 5 s backoff before giving up.
 """
 
 from __future__ import annotations
@@ -15,17 +18,27 @@ import asyncio
 import json
 import logging
 import ssl
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import asyncpg
 
 logger = logging.getLogger(__name__)
 
-_pool: asyncpg.Pool | None = None
-_MAX_CONV_ROWS: int = 10_000
-_PRUNE_BATCH:   int = 300
-_PRUNE_EMERG:  float = 0.20
+_pool:         asyncpg.Pool | None = None
+_last_error:   str | None          = None   # surfaced by health/status
+_MAX_CONV_ROWS: int  = 10_000
+_PRUNE_BATCH:   int  = 300
+_PRUNE_EMERG: float  = 0.20
+
+# Hostnames that REQUIRE SSL even when ?sslmode= is absent from the URL
+_SSL_REQUIRED_PATTERNS = (
+    "aivencloud.com",
+    "aiven.io",
+    "neon.tech",
+    "supabase.co",
+    ".cockroachlabs.cloud",
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,22 +49,23 @@ def _parse_dsn(raw_url: str) -> tuple[str, dict]:
     """
     Split a DATABASE_URL into (clean_dsn, asyncpg_kwargs).
 
-    asyncpg cannot handle these query-string parameters:
+    asyncpg does NOT understand these query-string parameters:
       • sslmode  — must become ssl=<SSLContext>
-      • sslcert / sslkey / sslrootcert / sslpassword — unused here
+      • sslcert / sslkey / sslrootcert / sslpassword — stripped
 
     SSL behaviour by sslmode value
     ──────────────────────────────
-      disable               → no SSL (default)
+      disable               → no SSL
       allow / prefer        → SSL with CERT_NONE  (accepts self-signed)
       require               → SSL with CERT_NONE  (Aiven / most hosted DBs)
-      verify-ca             → SSL with system CA bundle (strict)
-      verify-full           → SSL with system CA bundle + hostname check (strict)
+      verify-ca             → SSL with system CA  (strict, no hostname check)
+      verify-full           → SSL with system CA  (strict + hostname check)
 
-    Aiven gives ?sslmode=require with a self-signed CA, so CERT_NONE is correct
-    unless the user also provides the CA cert via AIVEN_CA_CERT env var.
+    Auto-force: if the hostname matches a known SSL-required provider
+    (Aiven, Neon, Supabase…) and sslmode is still "disable", we upgrade
+    it to "require" automatically.
     """
-    # Normalise postgres:// → postgresql:// (asyncpg requirement)
+    # asyncpg requires postgresql:// scheme
     raw_url = raw_url.replace("postgres://", "postgresql://", 1)
 
     parsed = urlparse(raw_url)
@@ -61,86 +75,127 @@ def _parse_dsn(raw_url: str) -> tuple[str, dict]:
     for key in ("sslcert", "sslkey", "sslrootcert", "sslpassword"):
         params.pop(key, None)
 
+    # ── Auto-detect SSL-required providers ───────────────────────────────
+    host = (parsed.hostname or "").lower()
+    if sslmode == "disable" and any(p in host for p in _SSL_REQUIRED_PATTERNS):
+        logger.warning(
+            "[db] Host '%s' requires SSL — auto-upgrading sslmode to 'require'", host
+        )
+        sslmode = "require"
+
     new_query = urlencode(params)
     clean_dsn = urlunparse(parsed._replace(query=new_query))
 
     kwargs: dict = {}
 
     if sslmode == "disable":
-        pass  # no ssl kwarg
+        pass  # no ssl kwarg → plain connection
 
     elif sslmode in ("allow", "prefer", "require"):
-        # Most hosted providers (Aiven, Railway, Fly.io) use self-signed certs
-        # behind their own CA — CERT_NONE accepts them without the CA file.
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode    = ssl.CERT_NONE
         kwargs["ssl"] = ctx
-        logger.debug("[db] SSL mode=%s → CERT_NONE context", sslmode)
+        logger.info("[db] SSL mode=%s → CERT_NONE context (host=%s)", sslmode, host)
 
     elif sslmode in ("verify-ca", "verify-full"):
-        # Full verification against system CA bundle
         ctx = ssl.create_default_context()
         if sslmode == "verify-ca":
             ctx.check_hostname = False
         kwargs["ssl"] = ctx
-        logger.debug("[db] SSL mode=%s → strict context", sslmode)
+        logger.info("[db] SSL mode=%s → strict context (host=%s)", sslmode, host)
 
     return clean_dsn, kwargs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Initialisation
+# Initialisation  (called from PTB post_init hook)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def init(database_url: str, max_conv_rows: int = 10_000) -> None:
     """
     Create the connection pool and ensure the schema exists.
-    Called once at startup via PTB post_init hook.
+    Retries up to 3 times with 5 s backoff.
     Safe with an empty DATABASE_URL — bot runs in-memory only.
     """
-    global _pool, _MAX_CONV_ROWS
+    global _pool, _last_error, _MAX_CONV_ROWS
 
     _MAX_CONV_ROWS = max_conv_rows
 
     if not database_url:
-        logger.warning("[db] DATABASE_URL not set — running in-memory only.")
+        _last_error = "DATABASE_URL env var is not set"
+        logger.warning(
+            "[db] DATABASE_URL is not set — running in-memory only.\n"
+            "     To enable persistence: set DATABASE_URL on Render to your\n"
+            "     Aiven (or other) Postgres connection string, e.g.:\n"
+            "     postgresql://user:pass@host:port/db?sslmode=require"
+        )
         return
 
-    clean_dsn, ssl_kwargs = _parse_dsn(database_url)
+    # Mask credentials for safe logging
+    try:
+        _p = urlparse(database_url)
+        safe_url = f"{_p.scheme}://***@{_p.hostname}:{_p.port}{_p.path}"
+    except Exception:
+        safe_url = "(unparseable URL)"
+
+    logger.info("[db] Connecting to: %s", safe_url)
 
     try:
-        # Wrap in wait_for so a network failure doesn't hang startup forever
-        _pool = await asyncio.wait_for(
-            asyncpg.create_pool(
-                clean_dsn,
-                min_size        = 1,
-                max_size        = 5,
-                command_timeout = 10,   # per-query timeout (seconds)
-                **ssl_kwargs,
-            ),
-            timeout = 20,              # total startup timeout
-        )
-        await _create_schema()
-        logger.info("[db] PostgreSQL connected — max_conv_rows=%d", _MAX_CONV_ROWS)
-
-    except asyncio.TimeoutError:
-        logger.error(
-            "[db] Connection timed out after 20 s. "
-            "Check host/port and that the DB allows external connections."
-        )
-        _pool = None
-
-    except ssl.SSLError as exc:
-        logger.error(
-            "[db] SSL handshake failed: %s. "
-            "Ensure DATABASE_URL contains ?sslmode=require for Aiven.", exc
-        )
-        _pool = None
-
+        clean_dsn, ssl_kwargs = _parse_dsn(database_url)
     except Exception as exc:
-        logger.error("[db] Connection failed: %s — running in-memory only.", exc)
-        _pool = None
+        _last_error = f"URL parse error: {exc}"
+        logger.error("[db] Cannot parse DATABASE_URL: %s", exc)
+        return
+
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            pool = await asyncio.wait_for(
+                asyncpg.create_pool(
+                    clean_dsn,
+                    min_size        = 1,
+                    max_size        = 5,
+                    command_timeout = 10,
+                    **ssl_kwargs,
+                ),
+                timeout = 20,
+            )
+            _pool      = pool
+            _last_error = None
+            await _create_schema()
+            logger.info(
+                "[db] PostgreSQL connected ✓  (attempt %d/%d, max_conv_rows=%d)",
+                attempt, max_attempts, _MAX_CONV_ROWS,
+            )
+            return  # success
+
+        except asyncio.TimeoutError:
+            _last_error = f"Connection timed out after 20 s (attempt {attempt}/{max_attempts})"
+            logger.warning("[db] %s", _last_error)
+
+        except ssl.SSLError as exc:
+            _last_error = f"SSL handshake failed: {exc}"
+            logger.error(
+                "[db] SSL error (attempt %d/%d): %s\n"
+                "     Make sure DATABASE_URL contains ?sslmode=require for Aiven.",
+                attempt, max_attempts, exc,
+            )
+
+        except Exception as exc:
+            _last_error = str(exc)
+            logger.error("[db] Connection failed (attempt %d/%d): %s", attempt, max_attempts, exc)
+
+        if attempt < max_attempts:
+            logger.info("[db] Retrying in 5 s…")
+            await asyncio.sleep(5)
+
+    logger.error(
+        "[db] All %d connection attempts failed — running in-memory only.\n"
+        "     Last error: %s",
+        max_attempts, _last_error,
+    )
+    _pool = None
 
 
 async def close() -> None:
@@ -153,6 +208,11 @@ async def close() -> None:
 
 def is_ready() -> bool:
     return _pool is not None
+
+
+def last_error() -> Optional[str]:
+    """Return the most recent connection error, or None if connected / never tried."""
+    return _last_error
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -353,12 +413,15 @@ async def conv_delete_all() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Stats  (used by /status command)
+# Stats  (used by /status command and health endpoint)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def stats() -> dict:
     if not _pool:
-        return {"ready": False}
+        result = {"ready": False}
+        if _last_error:
+            result["error"] = _last_error
+        return result
     try:
         async with _pool.acquire() as conn:
             conv_rows   = await conn.fetchval("SELECT COUNT(*) FROM conversations")
