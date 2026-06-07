@@ -3,6 +3,12 @@ db.py — Async PostgreSQL persistence layer (asyncpg).
 
 Supports Aiven, Render, Supabase, Neon, and any standard Postgres provider.
 
+Hai cách dùng:
+  1. Import bình thường trong main.py  → dùng init(), close(), các CRUD functions
+  2. Chạy trực tiếp: python db.py      → kết nối, tạo schema, in kết quả, exit 0/1
+     Dùng làm bước đầu tiên trong Start Command:
+       python db.py && python main.py
+
 Key fixes vs original:
   • asyncpg silently ignores ?sslmode= in the DSN — we strip it and pass a
     proper ssl.SSLContext instead.
@@ -18,6 +24,7 @@ import asyncio
 import json
 import logging
 import ssl
+import sys
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -25,8 +32,8 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
-_pool:         asyncpg.Pool | None = None
-_last_error:   str | None          = None   # surfaced by health/status
+_pool:          asyncpg.Pool | None = None
+_last_error:    str | None          = None   # surfaced by health/status
 _MAX_CONV_ROWS: int  = 10_000
 _PRUNE_BATCH:   int  = 300
 _PRUNE_EMERG: float  = 0.20
@@ -109,14 +116,14 @@ def _parse_dsn(raw_url: str) -> tuple[str, dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Initialisation  (called from PTB post_init hook)
+# Initialisation
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def init(database_url: str, max_conv_rows: int = 10_000) -> None:
     """
-    Create the connection pool and ensure the schema exists.
-    Retries up to 3 times with 5 s backoff.
-    Safe with an empty DATABASE_URL — bot runs in-memory only.
+    Tạo connection pool và đảm bảo schema tồn tại.
+    Thử lại tối đa 3 lần với 5s backoff.
+    An toàn khi DATABASE_URL rỗng — bot chạy in-memory.
     """
     global _pool, _last_error, _MAX_CONV_ROWS
 
@@ -126,9 +133,7 @@ async def init(database_url: str, max_conv_rows: int = 10_000) -> None:
         _last_error = "DATABASE_URL env var is not set"
         logger.warning(
             "[db] DATABASE_URL is not set — running in-memory only.\n"
-            "     To enable persistence: set DATABASE_URL on Render to your\n"
-            "     Aiven (or other) Postgres connection string, e.g.:\n"
-            "     postgresql://user:pass@host:port/db?sslmode=require"
+            "     Set DATABASE_URL on Render to your Postgres connection string."
         )
         return
 
@@ -435,3 +440,73 @@ async def stats() -> dict:
     except Exception as exc:
         logger.error("[db] stats: %s", exc)
         return {"ready": False, "error": str(exc)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone script — python db.py
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Dùng làm bước đầu trong Start Command của Render:
+#   python db.py && python main.py
+#
+# Luồng hoạt động:
+#   1. Đọc DATABASE_URL từ env
+#   2. Kết nối đến PostgreSQL (retry 3 lần)
+#   3. Tạo bảng / index nếu chưa tồn tại (CREATE TABLE IF NOT EXISTS)
+#   4. In kết quả ra stdout
+#   5. exit 0 → main.py chạy tiếp
+#      exit 1 → main.py KHÔNG chạy (tránh bot chạy mà không có DB)
+#
+if __name__ == "__main__":
+    import os
+
+    logging.basicConfig(
+        format  = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        level   = logging.INFO,
+        stream  = sys.stdout,
+    )
+
+    # Lấy config trực tiếp từ env (không import config.py để tránh vòng phụ thuộc)
+    _db_url      = os.getenv("DATABASE_URL", "")
+    _max_rows    = int(os.getenv("MAX_CONV_ROWS", "10000"))
+
+    async def _run_migration() -> None:
+        print("=" * 55, flush=True)
+        print("  db.py — Database setup & connection check", flush=True)
+        print("=" * 55, flush=True)
+
+        if not _db_url:
+            print("\n❌  DATABASE_URL không được thiết lập.", flush=True)
+            print("   Thêm biến môi trường DATABASE_URL vào Render.", flush=True)
+            sys.exit(1)
+
+        # Che credentials khi log
+        try:
+            _p = urlparse(_db_url)
+            safe = f"{_p.scheme}://***@{_p.hostname}:{_p.port}{_p.path}"
+        except Exception:
+            safe = "(unparseable URL)"
+
+        print(f"\n🔌  Kết nối: {safe}", flush=True)
+        print(f"    MAX_CONV_ROWS = {_max_rows}", flush=True)
+
+        await init(_db_url, max_conv_rows=_max_rows)
+
+        if not is_ready():
+            err = last_error() or "không rõ nguyên nhân"
+            print(f"\n❌  Kết nối thất bại: {err}", flush=True)
+            print("\n   Kiểm tra lại DATABASE_URL và đảm bảo DB đang chạy.", flush=True)
+            sys.exit(1)
+
+        # Lấy thống kê để xác nhận schema hoạt động
+        s = await stats()
+        print(f"\n✅  Kết nối thành công!", flush=True)
+        print(f"    conversations : {s.get('conv_rows', 0):,} rows", flush=True)
+        print(f"    bot_config    : {s.get('config_rows', 0):,} rows", flush=True)
+        print(f"    Schema        : OK (tables & indexes ready)", flush=True)
+        print("\n   → Tiếp tục khởi động main.py...\n", flush=True)
+
+        await close()
+        sys.exit(0)
+
+    asyncio.run(_run_migration())
