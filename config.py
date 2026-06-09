@@ -9,12 +9,7 @@ WEBHOOK_URL: str    = os.getenv("WEBHOOK_URL", "")
 WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────
-# Full connection string, e.g. postgresql://user:pass@host:5432/dbname
-# Render sets this automatically when a Postgres service is linked.
-DATABASE_URL: str = os.getenv("DATABASE_URL", "")
-
-# Max rows kept in the conversations table before the oldest are pruned.
-# ~40 chars avg per part → 10 000 rows ≈ 400 KB of message text.
+DATABASE_URL: str  = os.getenv("DATABASE_URL", "")
 MAX_CONV_ROWS: int = int(os.getenv("MAX_CONV_ROWS", "10000"))
 
 # ── Gemini ────────────────────────────────────────────────────────────────
@@ -23,17 +18,13 @@ GEMINI_KEYS: list[str] = [
 ]
 DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.1-flash-lite")
 MODELS: list[str] = [
-    # ── Gemini 3.x ───────────────────────────────────────────────────────
     "gemini-3.5-flash",
     "gemini-3.1-flash-lite",
     "gemini-3-flash-preview",
-    # ── Gemini 2.5 ───────────────────────────────────────────────────────
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite-preview-06-17",
-    # ── Gemini 2.0 ───────────────────────────────────────────────────────
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
-    # ── Gemini 1.5 ───────────────────────────────────────────────────────
     "gemini-1.5-pro",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
@@ -52,5 +43,16 @@ FOLLOWUP_COUNT: int   = int(os.getenv("FOLLOWUP_COUNT", "3"))
 MAX_HISTORY: int           = int(os.getenv("MAX_HISTORY", "40"))
 MESSAGE_MERGE_DELAY: float = float(os.getenv("MESSAGE_MERGE_DELAY", "1.5"))
 
-# ── Data dir (kept for compatibility; no longer used for JSON writes) ─────
+# ── Group Context Mode ────────────────────────────────────────────────────
+# Khi bật: bot đọc VÀ lưu TẤT CẢ tin nhắn trong group vào conv chung
+# (không chỉ tin nhắn của owner), giúp AI có context đầy đủ hơn.
+# conv_id của group = g:{chat_id} (shared toàn group) thay vì g:{chat_id}:u:{uid}
+GROUP_CONTEXT_ENABLED: bool = os.getenv("GROUP_CONTEXT_ENABLED", "true").lower() == "true"
+
+# ── File Cache (RAM only, NO disk/DB) ─────────────────────────────────────
+# Tổng dung lượng tối đa cho file cache trong RAM. Files được evict LRU
+# khi vượt giới hạn. Cache xóa hoàn toàn khi Render restart.
+FILE_CACHE_MAX_MB: int = int(os.getenv("FILE_CACHE_MAX_MB", "256"))
+
+# ── Data dir ─────────────────────────────────────────────────────────────
 DATA_DIR: str = "data"

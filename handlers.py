@@ -1,7 +1,13 @@
 """
 Telegram event handlers:
-  - handle_message  : text + photo messages (with accumulation / merge)
+  - handle_message  : text + ảnh + file + audio + video + sticker + voice
   - handle_callback : inline-button presses (follow-up + model selection)
+
+Nâng cấp:
+  [CTX] Đọc TẤT CẢ tin nhắn trong group (kể cả người khác) làm context.
+        Chỉ trigger AI khi: private chat / reply bot / mention / owner.
+  [FILE] Hỗ trợ nhận dạng và lưu context cho document/audio/video/sticker.
+  [EDIT] tg_edit_message tự fallback sang edit_message_caption cho media msg.
 """
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ from config import (
     ENABLE_FOLLOWUP,
     ENABLE_PLUGINS,
     FOLLOWUP_COUNT,
+    GROUP_CONTEXT_ENABLED,
     MESSAGE_MERGE_DELAY,
     MODELS,
     OWNER_ID,
@@ -37,19 +44,17 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────
-# Follow-up question cache  (#3 — fix callback_data overflow)
-# Key: 10-char hex  →  list[str]   (TTL 2h)
+# Follow-up question cache
 # ─────────────────────────────────────────────────────────────
 _fq_cache:  dict[str, list[str]] = {}
 _fq_expiry: dict[str, float]     = {}
-_FQ_TTL = 7200  # seconds
+_FQ_TTL = 7200
 
 
 def _fq_store(questions: list[str]) -> str:
     key = hashlib.md5(f"{_time.monotonic()}".encode()).hexdigest()[:10]
     _fq_cache[key]  = questions
     _fq_expiry[key] = _time.monotonic() + _FQ_TTL
-    # Evict expired keys
     now = _time.monotonic()
     for k in [k for k, t in _fq_expiry.items() if now > t]:
         _fq_cache.pop(k, None)
@@ -65,25 +70,96 @@ def _fq_get(key: str, idx: int) -> str | None:
 
 
 # ─────────────────────────────────────────────────────────────
-# Model label map  (for inline keyboard #10)
+# Model label map
 # ─────────────────────────────────────────────────────────────
 _MODEL_LABELS: dict[str, str] = {
-    "gemini-3.1-flash-lite":            "3.1 Flash Lite ⚡ (mặc định)",
-    "gemini-3.5-flash":                 "3.5 Flash 🌟",
-    "gemini-3-flash-preview":           "3 Flash Preview 🔭",
-    "gemini-2.5-flash":                 "2.5 Flash 🚀",
+    "gemini-3.1-flash-lite":               "3.1 Flash Lite ⚡ (mặc định)",
+    "gemini-3.5-flash":                    "3.5 Flash 🌟",
+    "gemini-3-flash-preview":              "3 Flash Preview 🔭",
+    "gemini-2.5-flash":                    "2.5 Flash 🚀",
     "gemini-2.5-flash-lite-preview-06-17": "2.5 Flash Lite 🪶",
-    "gemini-2.0-flash":                 "2.0 Flash 💨",
-    "gemini-2.0-flash-lite":            "2.0 Flash Lite 💤",
-    "gemini-1.5-pro":                   "1.5 Pro 🧠",
-    "gemini-1.5-flash":                 "1.5 Flash ✨",
-    "gemini-1.5-flash-8b":              "1.5 Flash 8B 🌩️",
+    "gemini-2.0-flash":                    "2.0 Flash 💨",
+    "gemini-2.0-flash-lite":               "2.0 Flash Lite 💤",
+    "gemini-1.5-pro":                      "1.5 Pro 🧠",
+    "gemini-1.5-flash":                    "1.5 Flash ✨",
+    "gemini-1.5-flash-8b":                 "1.5 Flash 8B 🌩️",
 }
+
+
+# ─────────────────────────────────────────────────────────────
+# Message text extractor  (text / photo / document / audio / video / sticker)
+# ─────────────────────────────────────────────────────────────
+
+def _extract_text(msg: Message, bot_username: str) -> Optional[str]:
+    """
+    Lấy nội dung text từ mọi loại tin nhắn.
+    Trả về None nếu không xử lý được.
+    """
+    mention = f"@{bot_username}"
+
+    if msg.text:
+        return msg.text.replace(mention, "").strip() or None
+
+    caption = (msg.caption or "").replace(mention, "").strip()
+
+    if msg.photo:
+        photo = msg.photo[-1]
+        base = f"[📸 ảnh — file_id: {photo.file_id}]"
+        return f"{caption}\n{base}" if caption else base
+
+    if msg.document:
+        d    = msg.document
+        name = d.file_name or "file"
+        base = f"[📎 file: {name} ({_fmt_size(d.file_size)}) — file_id: {d.file_id}]"
+        return f"{caption}\n{base}" if caption else base
+
+    if msg.audio:
+        a    = msg.audio
+        name = a.file_name or a.title or "audio"
+        base = f"[🎵 audio: {name} ({_fmt_size(a.file_size)}) — file_id: {a.file_id}]"
+        return f"{caption}\n{base}" if caption else base
+
+    if msg.video:
+        v    = msg.video
+        name = v.file_name or "video"
+        base = f"[🎬 video: {name} ({_fmt_size(v.file_size)}) — file_id: {v.file_id}]"
+        return f"{caption}\n{base}" if caption else base
+
+    if msg.voice:
+        base = f"[🎤 voice message ({_fmt_size(msg.voice.file_size)}) — file_id: {msg.voice.file_id}]"
+        return base
+
+    if msg.video_note:
+        base = f"[📹 video note — file_id: {msg.video_note.file_id}]"
+        return base
+
+    if msg.sticker:
+        s    = msg.sticker
+        emoji = s.emoji or ""
+        base  = f"[🎭 sticker {emoji} — file_id: {s.file_id}]"
+        return base
+
+    if msg.animation:
+        base = f"[🎬 GIF/animation — file_id: {msg.animation.file_id}]"
+        return f"{caption}\n{base}" if caption else base
+
+    return None
+
+
+def _fmt_size(size_bytes: Optional[int]) -> str:
+    if not size_bytes:
+        return "?"
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes // 1024}KB"
+    return f"{size_bytes // 1024 // 1024}MB"
 
 
 # ─────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────
+
 def _make_tg_ctx(bot, chat_id, user_id, message_id, thread_id,
                  chat_title, user_name) -> TelegramContext:
     return TelegramContext(
@@ -98,7 +174,6 @@ def _make_tg_ctx(bot, chat_id, user_id, message_id, thread_id,
 
 
 async def _keep_typing(bot, chat_id: int, thread_id: Optional[int]):
-    """Send 'typing…' every 4 s until cancelled."""
     try:
         while True:
             await bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -110,19 +185,19 @@ async def _keep_typing(bot, chat_id: int, thread_id: Optional[int]):
 
 
 # ─────────────────────────────────────────────────────────────
-# Send chunks  (#4 HTML, #3 keyboard, #5 returns list[Message])
+# Send chunks (MD→HTML, optional keyboard on last chunk)
 # ─────────────────────────────────────────────────────────────
+
 async def _send_chunks(
     bot,
-    chat_id:      int,
-    text:         str,
-    thread_id:    Optional[int],
-    reply_to_id:  Optional[int],
-    keyboard:     Optional[InlineKeyboardMarkup] = None,
+    chat_id:     int,
+    text:        str,
+    thread_id:   Optional[int],
+    reply_to_id: Optional[int],
+    keyboard:    Optional[InlineKeyboardMarkup] = None,
 ) -> list[Message]:
-    """Split text, convert MD→HTML, send with optional keyboard on last chunk."""
     chunks = utils.split_message(text)
-    sent: list[Message] = []
+    sent:   list[Message] = []
     for i, chunk in enumerate(chunks):
         kb = keyboard if (i == len(chunks) - 1) else None
         try:
@@ -141,10 +216,10 @@ async def _send_chunks(
 
 
 # ─────────────────────────────────────────────────────────────
-# Background follow-up attach  (#5 — send first, attach later)
+# Background follow-up attach
 # ─────────────────────────────────────────────────────────────
+
 async def _attach_followup(last_msg: Message, history: list, response: str):
-    """Runs in background: generate follow-ups then edit last message to attach keyboard."""
     try:
         follow_ups = await generate_followup(history, response, FOLLOWUP_COUNT)
         if not follow_ups:
@@ -153,7 +228,7 @@ async def _attach_followup(last_msg: Message, history: list, response: str):
         keyboard  = InlineKeyboardMarkup([
             [InlineKeyboardButton(
                 q[:60] + ("…" if len(q) > 60 else ""),
-                callback_data=f"fu:{cache_key}:{i}",   # ~18 bytes ✅
+                callback_data=f"fu:{cache_key}:{i}",
             )]
             for i, q in enumerate(follow_ups)
         ])
@@ -165,6 +240,7 @@ async def _attach_followup(last_msg: Message, history: list, response: str):
 # ─────────────────────────────────────────────────────────────
 # Core conversation processor
 # ─────────────────────────────────────────────────────────────
+
 async def _process(
     bot,
     chat_id:     int,
@@ -189,7 +265,6 @@ async def _process(
     system_prompt = custom_sys or build_system_prompt(tg_ctx)
     history       = state.get_history(cid)
 
-    # Status message
     status_msg: Optional[Message] = None
     try:
         status_msg = await bot.send_message(
@@ -222,7 +297,7 @@ async def _process(
         )
     except Exception as e:
         logger.error("run_agent error: %s", e, exc_info=True)
-        response = "❌ Có lỗi xảy ra khi xử lý. Thử lại nhé."   # #7 — no leak
+        response = "❌ Có lỗi xảy ra khi xử lý. Thử lại nhé."
     finally:
         typing_task.cancel()
         if status_msg:
@@ -231,13 +306,13 @@ async def _process(
             except Exception:
                 pass
 
-    state.push(cid, "user",  text)
+    # Lưu lịch sử: dùng [Name]: text cho group để nhất quán với push_context
+    user_entry = f"[{user_name}]: {text}" if not is_private else text
+    state.push(cid, "user",  user_entry)
     state.push(cid, "model", response)
 
-    # 1. Send response immediately (#5)
     sent = await _send_chunks(bot, chat_id, response, thread_id, reply_to_id)
 
-    # 2. Generate follow-ups in background (#5)
     if ENABLE_FOLLOWUP and sent:
         asyncio.create_task(
             _attach_followup(sent[-1], state.get_history(cid), response)
@@ -247,6 +322,7 @@ async def _process(
 # ─────────────────────────────────────────────────────────────
 # Message accumulation + delayed dispatch
 # ─────────────────────────────────────────────────────────────
+
 async def _delayed_dispatch(
     bot, accu_key, chat_id, user_id, message_id,
     thread_id, is_private, chat_title, user_name, reply_to_id,
@@ -261,70 +337,74 @@ async def _delayed_dispatch(
 
 
 def _build_accu_key(chat_id: int, user_id: int, thread_id: Optional[int]) -> str:
-    return f"{chat_id}:{user_id}:{thread_id or 0}"   # #6 — include thread_id
+    return f"{chat_id}:{user_id}:{thread_id or 0}"
 
 
 # ─────────────────────────────────────────────────────────────
-# Main message handler (text + photo)
+# Main message handler
+# Hỗ trợ: text, photo, document, audio, video, voice, sticker, animation
 # ─────────────────────────────────────────────────────────────
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg  = update.message
+    msg = update.message
     if not msg:
         return
 
     user = update.effective_user
     chat = update.effective_chat
-
-    # Auth: owner only (#0)
-    if user.id != OWNER_ID:
+    if not user:
         return
 
     bot_username = context.bot.username
     is_private   = chat.type == ChatType.PRIVATE
-    is_reply     = (
-        msg.reply_to_message
-        and msg.reply_to_message.from_user
+
+    # ── Xác định xem có trigger AI không ──────────────────────
+    is_reply_to_bot = (
+        msg.reply_to_message is not None
+        and msg.reply_to_message.from_user is not None
         and msg.reply_to_message.from_user.id == context.bot.id
     )
-    is_mentioned = f"@{bot_username}" in (msg.text or msg.caption or "")
+    raw_text     = msg.text or msg.caption or ""
+    is_mentioned = f"@{bot_username}" in raw_text
+    is_owner     = (user.id == OWNER_ID)
 
-    if not (is_private or is_reply or is_mentioned):
-        return
+    should_respond = is_private or is_reply_to_bot or is_mentioned or is_owner
 
-    # Build text from message (text or photo+caption)
-    if msg.photo:
-        # Photo message — describe it for the AI
-        caption = msg.caption or ""
-        if is_mentioned:
-            caption = caption.replace(f"@{bot_username}", "").strip()
-        # Use the largest photo
-        photo = msg.photo[-1]
-        text = f"[User đã gửi ảnh, file_id: {photo.file_id}]"
-        if caption:
-            text = f"{caption}\n{text}"
-        if not caption and not is_private:
-            return  # no caption in group = ignore
-    elif msg.text:
-        text = msg.text
-        if is_mentioned:
-            text = text.replace(f"@{bot_username}", "").strip()
-        if not text:
-            return
-    else:
+    # ── Lấy nội dung tin nhắn ─────────────────────────────────
+    text = _extract_text(msg, bot_username)
+    if text is None:
         return
 
     thread_id   = getattr(msg, "message_thread_id", None)
-    reply_to_id = msg.message_id
-    accu_key    = _build_accu_key(chat.id, user.id, thread_id)   # #6
-    chat_title  = getattr(chat, "title", None) or chat.effective_name or "Chat"
     user_name   = user.full_name or str(user.id)
+    chat_title  = getattr(chat, "title", None) or chat.effective_name or "Chat"
 
-    # Include replied-to message content as context
-    if msg.reply_to_message and msg.reply_to_message.text:
-        rtext = msg.reply_to_message.text[:500]
-        ruser = (msg.reply_to_message.from_user.full_name
-                 if msg.reply_to_message.from_user else "Unknown")
-        text = f'[Reply to {ruser}: "{rtext}"]\n{text}'
+    # ── [CTX] Lưu context cho TẤT CẢ tin nhắn trong group ────
+    # Ngay cả khi không respond, vẫn lưu để AI có context đầy đủ
+    if not is_private and GROUP_CONTEXT_ENABLED and not should_respond:
+        cid = state.conv_id(chat.id, user.id, thread_id, is_private,
+                            state.topic_mode(chat.id))
+        state.push_context(cid, user_name, text)
+        return  # Không respond → dừng tại đây
+
+    if not should_respond:
+        return
+
+    # ── Thêm nội dung replied-to message làm prefix ───────────
+    if msg.reply_to_message:
+        rtext = (msg.reply_to_message.text or msg.reply_to_message.caption or "")[:500]
+        if rtext:
+            ruser = (msg.reply_to_message.from_user.full_name
+                     if msg.reply_to_message.from_user else "Unknown")
+            text = f'[Reply to {ruser}: "{rtext}"]\n{text}'
+
+    # ── Bỏ @mention khỏi text ─────────────────────────────────
+    text = text.replace(f"@{bot_username}", "").strip()
+    if not text:
+        return
+
+    reply_to_id = msg.message_id
+    accu_key    = _build_accu_key(chat.id, user.id, thread_id)
 
     state.pending_texts[accu_key].append(text)
 
@@ -344,6 +424,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────
 # Callback handler (follow-up buttons + model selection)
 # ─────────────────────────────────────────────────────────────
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query or update.effective_user.id != OWNER_ID:
@@ -354,15 +435,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg  = query.message
     chat = update.effective_chat
 
-    # ── Model selection (#10) ─────────────────────────────────
+    # ── Model selection ───────────────────────────────────────
     if data.startswith("setmodel:"):
         model_name = data[9:]
         if model_name not in MODELS:
             return
-        thread_id  = getattr(msg, "message_thread_id", None)
-        is_priv    = chat.type == ChatType.PRIVATE
-        cid        = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
-                                   state.topic_mode(chat.id))
+        thread_id = getattr(msg, "message_thread_id", None)
+        is_priv   = chat.type == ChatType.PRIVATE
+        cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
+                                  state.topic_mode(chat.id))
         state.set_cfg(cid, model=model_name)
         label = _MODEL_LABELS.get(model_name, model_name)
         try:
@@ -374,7 +455,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Follow-up questions (#3) ──────────────────────────────
+    # ── Follow-up questions ───────────────────────────────────
     if data.startswith("fu:"):
         parts = data.split(":", 2)
         if len(parts) != 3:

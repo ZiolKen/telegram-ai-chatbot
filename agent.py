@@ -266,6 +266,7 @@ tạo poll, forward tin nhắn, sửa tin nhắn, gửi ảnh và nhiều hơn n
 🖼️ tg_send_photo     — Gửi ảnh (URL hoặc file_id) kèm caption HTML tuỳ chọn
 🎭 tg_send_sticker   — Gửi sticker (file_id hoặc URL file .webp/.tgs/.webm)
 🎬 tg_send_animation — Gửi GIF / animation (file_id hoặc URL .gif/.mp4)
+📁 tg_send_document   — Gửi file mọi định dạng (URL/file_id → auto-detect audio/video/image/doc); cache RAM 256MB
 ✏️ tg_edit_message   — Sửa tin nhắn đã gửi; hỗ trợ parse_mode='HTML'
 😊 tg_react          — Thả emoji reaction vào tin nhắn
 🗑️ tg_delete_message — Xóa tin nhắn

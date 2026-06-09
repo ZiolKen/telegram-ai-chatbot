@@ -854,3 +854,214 @@ TG_HANDLERS["tg_send_sticker"]   = tg_send_sticker
 TG_HANDLERS["tg_send_animation"] = tg_send_animation
 TOOL_STATUS["tg_send_sticker"]   = "🎭 Đang gửi sticker…"
 TOOL_STATUS["tg_send_animation"] = "🎬 Đang gửi animation/GIF…"
+
+
+# ═════════════════════════════════════════════════════════════
+# UPGRADE: tg_edit_message  — hỗ trợ cả text lẫn media message
+# ═════════════════════════════════════════════════════════════
+#
+# Vấn đề cũ: edit_message_text() fail với "there is no text in the message"
+# khi tin nhắn đính kèm ảnh/file.  Phải dùng edit_message_caption() thay thế.
+#
+# Fix: thử edit_message_text → nếu lỗi "no text" → fallback edit_message_caption
+#
+# Ghi đè handler đã đăng ký ở trên:
+
+async def tg_edit_message(ctx: TelegramContext, message_id: int,
+                          text: str, chat_id=None,
+                          parse_mode: str = "") -> str:
+    target = _resolve_chat(ctx, chat_id)
+    mid    = int(message_id)
+    pm     = parse_mode.strip() or None
+
+    # Thử edit text trước (cho tin nhắn thuần text)
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id    = target,
+            message_id = mid,
+            text       = text[:4096],
+            parse_mode = pm,
+        )
+        return f"✅ Đã sửa tin nhắn {message_id}."
+    except Exception as e:
+        err = str(e).lower()
+        # Telegram báo lỗi này khi tin nhắn có media (ảnh/file/video...)
+        is_media_msg = (
+            "there is no text in the message to edit" in err
+            or "message can't be edited" in err
+        )
+        if not is_media_msg:
+            logger.error("tg_edit_message text: %s", e)
+            return f"❌ Sửa thất bại: {e}"
+
+    # Fallback: sửa caption của media message
+    try:
+        await ctx.bot.edit_message_caption(
+            chat_id    = target,
+            message_id = mid,
+            caption    = text[:1024],
+            parse_mode = pm,
+        )
+        return f"✅ Đã sửa caption tin nhắn {message_id}."
+    except Exception as e2:
+        logger.error("tg_edit_message caption fallback: %s", e2)
+        return f"❌ Sửa caption thất bại: {e2}"
+
+
+# Cập nhật dispatcher (ghi đè entry cũ)
+TG_HANDLERS["tg_edit_message"] = tg_edit_message
+
+
+# ═════════════════════════════════════════════════════════════
+# NEW: tg_send_document — gửi file mọi định dạng (RAM cache)
+# ═════════════════════════════════════════════════════════════
+import io as _io
+import mimetypes as _mimetypes
+
+import file_cache as _fc
+from telegram import InputFile as _InputFile
+
+TG_TOOL_DECLS.append({
+    "name": "tg_send_document",
+    "description": (
+        "Gửi file bất kỳ định dạng tới chat Telegram. "
+        "Truyền URL công khai hoặc Telegram file_id. "
+        "Tự động nhận dạng loại file và dùng đúng method: "
+        "audio → send_audio, video → send_video, image → send_photo, "
+        "còn lại → send_document. "
+        "File được cache trong RAM để lần sau gửi lại nhanh hơn (không upload lại). "
+        "Giới hạn: 200 MB."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "file_ref":   {
+                "type": "STRING",
+                "description": "URL công khai (https://...) hoặc Telegram file_id",
+            },
+            "caption":    {"type": "STRING",  "description": "Caption (HTML OK)"},
+            "chat_id":    {"type": "STRING",  "description": "Chat ID hoặc @username (mặc định: chat hiện tại)"},
+            "thread_id":  {"type": "NUMBER",  "description": "Topic/thread ID"},
+            "filename":   {"type": "STRING",  "description": "Tên file hiển thị (tuỳ chọn, ghi đè tên tự đoán)"},
+            "force_doc":  {"type": "BOOLEAN", "description": "Luôn dùng send_document thay vì auto-detect"},
+        },
+        "required": ["file_ref"],
+    },
+})
+
+
+def _pick_send_method(mime: str, force_doc: bool):
+    """Chọn method Telegram phù hợp theo MIME type."""
+    if force_doc:
+        return "document"
+    if not mime:
+        return "document"
+    m = mime.split(";")[0].strip().lower()
+    if m.startswith("image/"):
+        return "photo"
+    if m.startswith("audio/") or m in ("application/ogg",):
+        return "audio"
+    if m.startswith("video/"):
+        return "video"
+    return "document"
+
+
+async def tg_send_document(
+    ctx: TelegramContext,
+    file_ref: str,
+    caption: str   = "",
+    chat_id        = None,
+    thread_id      = None,
+    filename: str  = "",
+    force_doc: bool = False,
+) -> str:
+    target   = _resolve_chat(ctx, chat_id)
+    thr      = int(thread_id) if thread_id else ctx.thread_id
+    cap      = caption[:1024] if caption else None
+    pm       = "HTML" if cap else None
+    cache_key: str | None = None
+
+    # ── Phân loại: URL hay file_id ────────────────────────────
+    is_url = file_ref.startswith("http://") or file_ref.startswith("https://")
+
+    if is_url:
+        cache_key = file_ref
+        entry     = _fc.get(file_ref)
+
+        if entry and entry.tg_file_id:
+            # ✅ Đã upload trước rồi → dùng file_id (không tốn bandwidth)
+            send_input = entry.tg_file_id
+            mime       = entry.mime
+            fname      = filename or entry.filename
+            logger.info("[tg_send_document] Reuse file_id cho %s", file_ref[:60])
+        else:
+            if not entry:
+                # Tải về RAM
+                entry = await _fc.download(file_ref)
+                if not entry:
+                    return f"❌ Không thể tải file từ URL: {file_ref}"
+
+            fname = filename or entry.filename
+            buf   = _io.BytesIO(entry.data)
+            buf.name = fname
+            send_input = _InputFile(buf, filename=fname)
+            mime       = entry.mime
+    else:
+        # Telegram file_id — gửi trực tiếp
+        send_input = file_ref
+        mime       = ""
+        fname      = filename or "file"
+        cache_key  = None
+
+    method = _pick_send_method(mime, force_doc)
+    logger.info("[tg_send_document] method=%s file=%s", method, fname)
+
+    try:
+        msg = None
+        if method == "photo":
+            msg = await ctx.bot.send_photo(
+                chat_id=target, photo=send_input,
+                caption=cap, parse_mode=pm, message_thread_id=thr,
+            )
+            tg_fid = msg.photo[-1].file_id if msg.photo else None
+
+        elif method == "audio":
+            msg = await ctx.bot.send_audio(
+                chat_id=target, audio=send_input,
+                caption=cap, parse_mode=pm, message_thread_id=thr,
+                filename=fname,
+            )
+            tg_fid = msg.audio.file_id if msg.audio else None
+
+        elif method == "video":
+            msg = await ctx.bot.send_video(
+                chat_id=target, video=send_input,
+                caption=cap, parse_mode=pm, message_thread_id=thr,
+                filename=fname,
+            )
+            tg_fid = msg.video.file_id if msg.video else None
+
+        else:  # document
+            msg = await ctx.bot.send_document(
+                chat_id=target, document=send_input,
+                caption=cap, parse_mode=pm, message_thread_id=thr,
+                filename=fname,
+            )
+            tg_fid = msg.document.file_id if msg.document else None
+
+        # Cache Telegram file_id để lần sau không cần upload lại
+        if cache_key and tg_fid:
+            _fc.set_tg_file_id(cache_key, tg_fid)
+            logger.info("[tg_send_document] Đã lưu file_id cho %s", cache_key[:60])
+
+        size_info = f"{len(entry.data) // 1024} KB" if is_url and entry else fname
+        return f"✅ Đã gửi {method} '{fname}' ({size_info}) tới {target} (msg_id={msg.message_id})."
+
+    except Exception as e:
+        logger.error("tg_send_document: %s", e)
+        return f"❌ Gửi file thất bại: {e}"
+
+
+# Đăng ký handler + status
+TG_HANDLERS["tg_send_document"] = tg_send_document
+TOOL_STATUS["tg_send_document"] = "📤 Đang gửi file…"

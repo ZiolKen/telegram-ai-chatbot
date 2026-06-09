@@ -36,9 +36,10 @@ from telegram.ext import (
 )
 
 import db
+import file_cache
 import state
 from config import (
-    BOT_TOKEN, DATABASE_URL, GEMINI_KEYS, MAX_CONV_ROWS,
+    BOT_TOKEN, DATABASE_URL, FILE_CACHE_MAX_MB, GEMINI_KEYS, MAX_CONV_ROWS,
     OWNER_ID, PORT, WEBHOOK_SECRET, WEBHOOK_URL,
 )
 from commands import (
@@ -81,7 +82,17 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("topic",    cmd_topic))
     app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+        (
+            filters.TEXT
+            | filters.PHOTO
+            | filters.Document.ALL
+            | filters.AUDIO
+            | filters.VIDEO
+            | filters.VOICE
+            | filters.VIDEO_NOTE
+            | filters.Sticker.ALL
+            | filters.ANIMATION
+        ) & ~filters.COMMAND,
         handle_message,
     ))
     app.add_handler(CallbackQueryHandler(handle_callback))
@@ -145,6 +156,10 @@ async def run_webhook(app: Application) -> None:
             )
     else:
         logger.warning("[startup] DATABASE_URL not set — in-memory only.")
+
+    # ── Init file cache (RAM only) ──────────────────────────────────────────
+    file_cache.configure(FILE_CACHE_MAX_MB)
+    logger.info("[startup] File cache: %d MB limit", FILE_CACHE_MAX_MB)
 
     # ── 2. Web server lên (Render health check pass từ đây) ───────────────
     aio = web.Application()
