@@ -368,6 +368,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_mentioned = f"@{bot_username}" in raw_text
     is_owner     = (user.id == OWNER_ID)
 
+    # ── Auth: chỉ owner mới được interact ───────────────────────
+    # Người khác → chỉ lưu context (nếu bật), không bao giờ reply
+    if not is_owner:
+        text = _extract_text(msg, bot_username)
+        if text is not None and not is_private and GROUP_CONTEXT_ENABLED:
+            thread_id = getattr(msg, "message_thread_id", None)
+            user_name = user.full_name or str(user.id)
+            cid = state.conv_id(chat.id, user.id, thread_id, is_private,
+                                state.topic_mode(chat.id))
+            state.push_context(cid, user_name, text)
+        return  # non-owner → dừng, không reply
+
+    # ── Owner: chỉ reply khi ping/reply bot (trong nhóm) ──────
     should_respond = is_private or is_reply_to_bot or is_mentioned
 
     # ── Lấy nội dung tin nhắn ─────────────────────────────────
@@ -379,8 +392,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name   = user.full_name or str(user.id)
     chat_title  = getattr(chat, "title", None) or chat.effective_name or "Chat"
 
-    # ── [CTX] Lưu context cho TẤT CẢ tin nhắn trong group ────
-    # Ngay cả khi không respond, vẫn lưu để AI có context đầy đủ
+    # ── [CTX] Lưu context tin nhắn owner không trigger ────────
     if not is_private and GROUP_CONTEXT_ENABLED and not should_respond:
         cid = state.conv_id(chat.id, user.id, thread_id, is_private,
                             state.topic_mode(chat.id))
