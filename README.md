@@ -13,7 +13,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | **Web** | DuckDuckGo & Google search, full-page URL fetch, ArXiv paper search |
 | **Code** | Safe Python sandbox — subprocess with 15s timeout, AST security scan, no network/filesystem access |
 | **Messaging** | Send text, photos, stickers, GIFs, polls, dice to any chat or channel |
-| **Files** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 200 MB |
+| **Files** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 256 MB |
 | **Moderation** | Ban, unban, mute, unmute users |
 | **Admin** | Promote/demote admins, pin/unpin messages, delete messages, forward, copy |
 | **Chat mgmt** | Set title/description, get chat info, member count |
@@ -56,7 +56,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | `MAX_HISTORY` | `40` | Max conversation turns kept in memory per conversation |
 | `MAX_CONV_ROWS` | `10000` | Max rows in the PostgreSQL `conversations` table before LRU pruning |
 | `GROUP_CONTEXT_ENABLED` | `true` | Store all group messages (from everyone) as shared context |
-| `FILE_CACHE_MAX_MB` | `200` | RAM limit for the in-memory file cache (MB) |
+| `FILE_CACHE_MAX_MB` | `256` | RAM limit for the in-memory file cache (MB) |
 | `ENABLE_PLUGINS` | `true` | Enable all tools/plugins globally |
 | `ENABLE_FOLLOWUP` | `true` | Generate follow-up question buttons after responses |
 | `FOLLOWUP_COUNT` | `3` | Number of follow-up questions to generate |
