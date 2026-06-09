@@ -368,7 +368,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_mentioned = f"@{bot_username}" in raw_text
     is_owner     = (user.id == OWNER_ID)
 
-    should_respond = is_private or is_reply_to_bot or is_mentioned or is_owner
+    should_respond = is_private or is_reply_to_bot or is_mentioned
 
     # ── Lấy nội dung tin nhắn ─────────────────────────────────
     text = _extract_text(msg, bot_username)
