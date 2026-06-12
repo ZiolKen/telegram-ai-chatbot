@@ -26,7 +26,9 @@ from telegram import (
 from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
+from datetime import datetime, timezone
 import state
+from state import FeedEntry
 import utils
 from agent import build_system_prompt, generate_followup, run_agent
 from config import (
@@ -378,6 +380,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cid = state.conv_id(chat.id, user.id, thread_id, is_private,
                                 state.topic_mode(chat.id))
             state.push_context(cid, user_name, text)
+            # ── Feed buffer: lưu tất cả tin nhóm để /feed xem lại ─
+            username = f"@{user.username}" if user.username else ""
+            state.feed_push(FeedEntry(
+                chat_id   = chat.id,
+                msg_id    = msg.message_id,
+                date      = msg.date.replace(tzinfo=timezone.utc) if msg.date.tzinfo is None else msg.date,
+                user_id   = user.id,
+                user_name = user_name,
+                username  = username,
+                text      = text,
+            ))
         return  # non-owner → dừng, không reply
 
     # ── Owner: chỉ reply khi ping/reply bot (trong nhóm) ──────
@@ -467,6 +480,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
+    # ── Feed actions ─────────────────────────────────────────
+    if data.startswith("fd:"):
+        await _handle_feed_action(query, context, data)
+        return
+
     # ── Follow-up questions ───────────────────────────────────
     if data.startswith("fu:"):
         parts = data.split(":", 2)
@@ -507,3 +525,117 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat.id, user.id, msg.message_id,
             thread_id, is_priv, chat_title, user_name, question,
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# Feed action handler
+# callback_data format: "fd:{action}:{chat_id}:{msg_id_or_user_id}"
+# ─────────────────────────────────────────────────────────────
+async def _handle_feed_action(
+    query: "CallbackQuery",
+    context: ContextTypes.DEFAULT_TYPE,
+    data: str,
+) -> None:
+    from datetime import datetime, timezone
+    from telegram import ChatPermissions
+
+    parts = data.split(":")
+    if len(parts) != 4:
+        await query.answer("❌ Dữ liệu không hợp lệ.")
+        return
+
+    _, action, raw_cid, raw_id = parts
+    try:
+        chat_id = int(raw_cid)
+        tgt_id  = int(raw_id)
+    except ValueError:
+        await query.answer("❌ ID không hợp lệ.")
+        return
+
+    bot = context.bot
+
+    # ── del ──────────────────────────────────────────────────
+    if action == "del":
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=tgt_id)
+            await query.answer("🗑️ Đã xóa.")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        except Exception as e:
+            await query.answer(f"❌ {e}", show_alert=True)
+
+    # ── pin ──────────────────────────────────────────────────
+    elif action == "pin":
+        try:
+            await bot.pin_chat_message(chat_id=chat_id, message_id=tgt_id,
+                                        disable_notification=True)
+            await query.answer("📌 Đã ghim.")
+        except Exception as e:
+            await query.answer(f"❌ {e}", show_alert=True)
+
+    # ── rep (reply context) ───────────────────────────────────
+    elif action == "rep":
+        # Post a prompt message so the owner knows to reply
+        try:
+            await bot.send_message(
+                chat_id    = chat_id,
+                text       = f"↩️ Reply tới tin nhắn <code>#{tgt_id}</code> — nhắn AI để compose trả lời.",
+                parse_mode = "HTML",
+                reply_to_message_id = tgt_id,
+            )
+            await query.answer("↩️ Đã set reply context.")
+        except Exception as e:
+            await query.answer(f"❌ {e}", show_alert=True)
+
+    # ── warn ─────────────────────────────────────────────────
+    elif action == "warn":
+        count = state.warn_add(chat_id, tgt_id)
+        max_w = state.get_max_warns()
+        msg_text = f"⚠️ User <code>{tgt_id}</code>: {count}/{max_w} cảnh cáo."
+        if count >= max_w:
+            try:
+                await bot.ban_chat_member(chat_id=chat_id, user_id=tgt_id)
+                state.warn_reset(chat_id, tgt_id)
+                msg_text += f"\n🚫 Đạt max → đã BAN."
+            except Exception as e:
+                msg_text += f"\n❌ Auto-ban thất bại: {e}"
+        await query.answer(f"⚠️ Warn {count}/{max_w}")
+        try:
+            await bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
+        except Exception:
+            pass
+
+    # ── mute ─────────────────────────────────────────────────
+    elif action == "mute":
+        until = datetime.now(tz=timezone.utc) + __import__("datetime").timedelta(hours=1)
+        perms = ChatPermissions(can_send_messages=False)
+        try:
+            await bot.restrict_chat_member(
+                chat_id=chat_id, user_id=tgt_id, permissions=perms, until_date=until
+            )
+            await query.answer("🔇 Muted 1h.")
+            await bot.send_message(chat_id=chat_id,
+                                    text=f"🔇 Đã mute <code>{tgt_id}</code> 1h.",
+                                    parse_mode="HTML")
+        except Exception as e:
+            await query.answer(f"❌ {e}", show_alert=True)
+
+    # ── ban ───────────────────────────────────────────────────
+    elif action == "ban":
+        try:
+            await bot.ban_chat_member(chat_id=chat_id, user_id=tgt_id)
+            await query.answer("🚫 Banned.")
+            await bot.send_message(chat_id=chat_id,
+                                    text=f"🚫 Đã ban <code>{tgt_id}</code>.",
+                                    parse_mode="HTML")
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        except Exception as e:
+            await query.answer(f"❌ {e}", show_alert=True)
+
+    else:
+        await query.answer("❌ Action không xác định.")

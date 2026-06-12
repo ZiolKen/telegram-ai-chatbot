@@ -46,6 +46,13 @@ from commands import (
     cmd_help, cmd_model, cmd_plugins,
     cmd_reset, cmd_start, cmd_status,
     cmd_sysreset, cmd_topic,
+    # New moderation commands
+    cmd_del, cmd_pin,
+    cmd_ban, cmd_unban,
+    cmd_mute, cmd_unmute,
+    cmd_addadmin, cmd_rmadmin,
+    cmd_warn, cmd_warns, cmd_resetwarns,
+    cmd_feed,
 )
 from handlers import handle_callback, handle_message
 
@@ -81,6 +88,19 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("plugins",  cmd_plugins))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("topic",    cmd_topic))
+    # ── Moderation commands ───────────────────────────────────
+    app.add_handler(CommandHandler("del",        cmd_del))
+    app.add_handler(CommandHandler("pin",        cmd_pin))
+    app.add_handler(CommandHandler("ban",        cmd_ban))
+    app.add_handler(CommandHandler("unban",      cmd_unban))
+    app.add_handler(CommandHandler("mute",       cmd_mute))
+    app.add_handler(CommandHandler("unmute",     cmd_unmute))
+    app.add_handler(CommandHandler("addadmin",   cmd_addadmin))
+    app.add_handler(CommandHandler("rmadmin",    cmd_rmadmin))
+    app.add_handler(CommandHandler("warn",       cmd_warn))
+    app.add_handler(CommandHandler("warns",      cmd_warns))
+    app.add_handler(CommandHandler("resetwarns", cmd_resetwarns))
+    app.add_handler(CommandHandler("feed",       cmd_feed))
     app.add_handler(MessageHandler(
         (
             filters.TEXT

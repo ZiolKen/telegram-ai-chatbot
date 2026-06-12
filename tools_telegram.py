@@ -1065,3 +1065,232 @@ async def tg_send_document(
 # Đăng ký handler + status
 TG_HANDLERS["tg_send_document"] = tg_send_document
 TOOL_STATUS["tg_send_document"] = "📤 Đang gửi file…"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# NEW TOOLS: leave_chat, invite_user, create_invite_link, send_media_group,
+#            get_user_info
+# ═════════════════════════════════════════════════════════════════════════════
+from telegram import InputMediaPhoto as _IMP, InputMediaVideo as _IMV
+
+TG_TOOL_DECLS.extend([
+    {
+        "name": "tg_leave_chat",
+        "description": "Bot tự thoát khỏi một nhóm/kênh.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "chat_id": {"type": "STRING", "description": "Chat ID hoặc @username (mặc định: chat hiện tại)"},
+            },
+        },
+    },
+    {
+        "name": "tg_create_invite_link",
+        "description": "Tạo link mời vào nhóm/kênh. Có thể giới hạn số lần dùng và thời gian hết hạn.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "chat_id":       {"type": "STRING", "description": "Chat ID (mặc định: hiện tại)"},
+                "name":          {"type": "STRING", "description": "Tên link (tuỳ chọn)"},
+                "expire_hours":  {"type": "NUMBER", "description": "Hết hạn sau N giờ (0 = không hết hạn)"},
+                "member_limit":  {"type": "NUMBER", "description": "Giới hạn số lượt dùng (0 = không giới hạn)"},
+                "creates_join_request": {"type": "BOOLEAN", "description": "Yêu cầu duyệt thay vì vào thẳng"},
+            },
+        },
+    },
+    {
+        "name": "tg_invite_user",
+        "description": "Thêm trực tiếp một user vào nhóm/kênh (bot phải có quyền Invite Users).",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "user_id":  {"type": "NUMBER", "description": "Telegram user ID cần mời"},
+                "chat_id":  {"type": "STRING", "description": "Chat ID đích (mặc định: hiện tại)"},
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
+        "name": "tg_send_media_group",
+        "description": (
+            "Gửi album gồm nhiều ảnh và/hoặc video trong một tin nhắn duy nhất. "
+            "Truyền danh sách URL hoặc file_id. "
+            "Tối đa 10 media mỗi album. Caption chỉ áp dụng cho media đầu tiên."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "media": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "type":    {"type": "STRING", "description": "photo hoặc video"},
+                            "media":   {"type": "STRING", "description": "URL hoặc file_id"},
+                            "caption": {"type": "STRING", "description": "Caption (chỉ item đầu tiên)"},
+                        },
+                    },
+                    "description": "Danh sách media [{type, media, caption?}]",
+                },
+                "chat_id":   {"type": "STRING", "description": "Chat ID (mặc định: hiện tại)"},
+                "thread_id": {"type": "NUMBER", "description": "Topic/thread ID"},
+            },
+            "required": ["media"],
+        },
+    },
+    {
+        "name": "tg_get_user_info",
+        "description": "Lấy thông tin chi tiết về một user Telegram: tên, username, status trong nhóm, v.v.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "user_id": {"type": "NUMBER", "description": "Telegram user ID"},
+                "chat_id": {"type": "STRING", "description": "Chat để kiểm tra status (mặc định: hiện tại)"},
+            },
+            "required": ["user_id"],
+        },
+    },
+    {
+        "name": "tg_set_user_title",
+        "description": "Đặt title tuỳ chỉnh cho admin trong nhóm.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "user_id": {"type": "NUMBER"},
+                "title":   {"type": "STRING", "description": "Title hiển thị (tối đa 16 ký tự)"},
+                "chat_id": {"type": "STRING"},
+            },
+            "required": ["user_id", "title"],
+        },
+    },
+])
+
+
+async def tg_leave_chat(ctx: TelegramContext, chat_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    try:
+        await ctx.bot.leave_chat(chat_id=target)
+        return f"✅ Bot đã thoát khỏi chat {target}."
+    except Exception as e:
+        logger.error("tg_leave_chat: %s", e)
+        return f"❌ Thoát chat thất bại: {e}"
+
+
+async def tg_create_invite_link(ctx: TelegramContext, chat_id=None,
+                                 name: str = "", expire_hours: float = 0,
+                                 member_limit: int = 0,
+                                 creates_join_request: bool = False) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    until  = None
+    if expire_hours and expire_hours > 0:
+        until = datetime.now(tz=timezone.utc) + timedelta(hours=float(expire_hours))
+    try:
+        link = await ctx.bot.create_chat_invite_link(
+            chat_id              = target,
+            name                 = name[:32] if name else None,
+            expire_date          = until,
+            member_limit         = int(member_limit) if member_limit else None,
+            creates_join_request = bool(creates_join_request),
+        )
+        parts = [f"✅ Đã tạo invite link cho {target}:", f"🔗 {link.invite_link}"]
+        if name:
+            parts.append(f"📛 Tên: {name}")
+        if expire_hours:
+            parts.append(f"⏰ Hết hạn sau {expire_hours}h")
+        if member_limit:
+            parts.append(f"👥 Giới hạn: {member_limit} người")
+        return "\n".join(parts)
+    except Exception as e:
+        logger.error("tg_create_invite_link: %s", e)
+        return f"❌ Tạo invite link thất bại: {e}"
+
+
+async def tg_invite_user(ctx: TelegramContext, user_id: int, chat_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    try:
+        await ctx.bot.add_chat_member(chat_id=target, user_id=int(user_id))
+        return f"✅ Đã thêm user {user_id} vào {target}."
+    except Exception as e:
+        logger.error("tg_invite_user: %s", e)
+        return f"❌ Mời user thất bại: {e}"
+
+
+async def tg_send_media_group(ctx: TelegramContext, media: list,
+                               chat_id=None, thread_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    thr    = int(thread_id) if thread_id else ctx.thread_id
+    if not media:
+        return "❌ Danh sách media trống."
+
+    items = []
+    for i, m in enumerate(media[:10]):
+        kind    = str(m.get("type", "photo")).lower()
+        src     = m.get("media", "")
+        caption = m.get("caption", "") if i == 0 else None
+        if not src:
+            continue
+        if kind == "video":
+            items.append(_IMV(media=src, caption=caption, parse_mode="HTML" if caption else None))
+        else:
+            items.append(_IMP(media=src, caption=caption, parse_mode="HTML" if caption else None))
+
+    if not items:
+        return "❌ Không có media hợp lệ."
+    try:
+        msgs = await ctx.bot.send_media_group(
+            chat_id=target, media=items, message_thread_id=thr
+        )
+        return f"✅ Đã gửi album {len(msgs)} media tới {target}."
+    except Exception as e:
+        logger.error("tg_send_media_group: %s", e)
+        return f"❌ Gửi media group thất bại: {e}"
+
+
+async def tg_get_user_info(ctx: TelegramContext, user_id: int, chat_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    uid    = int(user_id)
+    lines  = []
+    try:
+        member = await ctx.bot.get_chat_member(chat_id=target, user_id=uid)
+        u = member.user
+        lines += [
+            f"👤 {u.full_name}",
+            f"🆔 ID: {u.id}",
+        ]
+        if u.username:
+            lines.append(f"🔗 @{u.username}")
+        lines.append(f"📋 Status: {member.status}")
+        if hasattr(member, "custom_title") and member.custom_title:
+            lines.append(f"🏷️ Title: {member.custom_title}")
+        if u.is_bot:
+            lines.append("🤖 Bot: Có")
+    except Exception:
+        lines.append(f"🆔 ID: {uid} (không lấy được thông tin từ chat này)")
+    return "\n".join(lines) if lines else f"Không tìm thấy user {uid}."
+
+
+async def tg_set_user_title(ctx: TelegramContext, user_id: int,
+                             title: str, chat_id=None) -> str:
+    target = _resolve_chat(ctx, chat_id)
+    try:
+        await ctx.bot.set_chat_administrator_custom_title(
+            chat_id=target, user_id=int(user_id), custom_title=title[:16]
+        )
+        return f"✅ Đã đặt title '{title}' cho user {user_id}."
+    except Exception as e:
+        return f"❌ Đặt title thất bại: {e}"
+
+
+TG_HANDLERS["tg_leave_chat"]        = tg_leave_chat
+TG_HANDLERS["tg_create_invite_link"]= tg_create_invite_link
+TG_HANDLERS["tg_invite_user"]       = tg_invite_user
+TG_HANDLERS["tg_send_media_group"]  = tg_send_media_group
+TG_HANDLERS["tg_get_user_info"]     = tg_get_user_info
+TG_HANDLERS["tg_set_user_title"]    = tg_set_user_title
+
+TOOL_STATUS["tg_leave_chat"]         = "🚪 Đang thoát chat…"
+TOOL_STATUS["tg_create_invite_link"] = "🔗 Đang tạo invite link…"
+TOOL_STATUS["tg_invite_user"]        = "➕ Đang mời user…"
+TOOL_STATUS["tg_send_media_group"]   = "🖼️ Đang gửi album…"
+TOOL_STATUS["tg_get_user_info"]      = "👤 Đang lấy thông tin user…"
+TOOL_STATUS["tg_set_user_title"]     = "🏷️ Đang đặt title…"
