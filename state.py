@@ -74,6 +74,11 @@ def feed_size(chat_id: int) -> int:
     return len(q) if q else 0
 
 
+def feed_list_chats() -> list[int]:
+    """Return all chat_ids that have at least one buffered message."""
+    return [cid for cid, q in _feed.items() if q]
+
+
 # ── Warn system  (in-memory, persisted via bot_config) ───────────────────────
 _warns: dict[tuple[int, int], int] = {}   # (chat_id, user_id) → count
 MAX_WARNS = 3   # configurable via /setwarnlimit

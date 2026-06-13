@@ -34,8 +34,9 @@ from telegram.ext import ContextTypes
 
 import db
 import state
-from config import DEFAULT_MODEL, ENABLE_FOLLOWUP, ENABLE_PLUGINS, MODELS, OWNER_ID
+from config import DEFAULT_LANG, DEFAULT_MODEL, ENABLE_FOLLOWUP, ENABLE_PLUGINS, MODELS, OWNER_ID
 from handlers import _MODEL_LABELS
+from i18n import t, lang_list_str, lang_name, SUPPORTED
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,12 @@ def _owner_only(update: Update) -> bool:
     return update.effective_user.id == OWNER_ID
 
 
+def _lang(update: Update) -> str:
+    """Return the language code for the current conversation."""
+    cid = _get_conv_id(update)
+    return state.get_cfg(cid).get("lang", DEFAULT_LANG)
+
+
 def _parse_uid_arg(arg: str) -> Optional[int]:
     """Parse '@username' or numeric user_id. Returns int or None."""
     s = arg.strip().lstrip("@")
@@ -71,39 +78,34 @@ def _parse_uid_arg(arg: str) -> Optional[int]:
 def _parse_duration(s: str) -> Optional[int]:
     """
     Parse duration string → seconds.
-    Supported units: s h d w m(onths) y
-    Examples: "30s" "2h" "1d" "1w" "3m" "1y" "1h30m"
-    Returns None if unparseable.
+    Units: s=seconds  m=minutes  h=hours  d=days  w=weeks  mo=months  y=years
+    Examples: "30s" "5m" "2h" "1d" "1w" "3mo" "1y" "1h30m"
+    Note: "m" = minutes (NOT months). Use "mo" for months.
     """
     UNITS = {
         "s":  1,
+        "m":  60,           # minutes
         "h":  3600,
         "d":  86400,
         "w":  604800,
-        "m":  2592000,    # 30 days
-        "y":  31536000,   # 365 days
+        "mo": 2592000,      # months (30 days)
+        "y":  31536000,
     }
     total = 0
-    for num, unit in re.findall(r"(\d+)\s*([smhdwy])", s.lower()):
+    # Match "mo" before "m" to avoid mis-parsing "1mo" as "1m" + leftover "o"
+    for num, unit in re.findall(r"(\d+)\s*(mo|[smhdwy])", s.lower()):
         total += int(num) * UNITS.get(unit, 0)
     return total if total > 0 else None
 
 
 def _fmt_duration(secs: int) -> str:
-    if secs <= 0:
-        return "vĩnh viễn"
-    if secs < 60:
-        return f"{secs}s"
-    if secs < 3600:
-        return f"{secs // 60}m"
-    if secs < 86400:
-        return f"{secs // 3600}h"
-    if secs < 604800:
-        return f"{secs // 86400}d"
-    if secs < 2592000:
-        return f"{secs // 604800}w"
-    if secs < 31536000:
-        return f"{secs // 2592000}mo"
+    if secs <= 0:        return "∞"
+    if secs < 60:        return f"{secs}s"
+    if secs < 3600:      return f"{secs // 60}m"
+    if secs < 86400:     return f"{secs // 3600}h"
+    if secs < 604800:    return f"{secs // 86400}d"
+    if secs < 2592000:   return f"{secs // 604800}w"
+    if secs < 31536000:  return f"{secs // 2592000}mo"
     return f"{secs // 31536000}y"
 
 
@@ -142,44 +144,46 @@ async def _resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _owner_only(update):
         return
-    await _reply(update,
-        "🤖 <b>AI Agent Telegram</b>\n\n"
-        "Gõ /help để xem toàn bộ lệnh."
-    )
+    await _reply(update, t("start", _lang(update)))
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _owner_only(update):
         return
+    lang       = _lang(update)
     model_lines = "\n".join(
         f"• <code>{m}</code>" + ("  ✅" if m == DEFAULT_MODEL else "")
         for m in MODELS
     )
-    await _reply(update,
-        "📖 <b>Lệnh có sẵn</b>\n\n"
-        "<b>🛡️ Quản lý nhóm</b>\n"
-        "<code>/del [id]</code>          — Xóa tin nhắn (reply hoặc ID)\n"
-        "<code>/pin [silent]</code>       — Ghim tin nhắn đang reply\n"
-        "<code>/ban [@u] [lý do]</code>   — Ban user\n"
-        "<code>/unban @u</code>           — Unban user\n"
-        "<code>/mute [@u] &lt;tg&gt;</code>  — Mute (30s 2h 1d 1w 3m 1y)\n"
-        "<code>/unmute @u</code>          — Unmute user\n"
-        "<code>/addadmin [@u] [flags]</code> — Promote admin\n"
-        "   Flags: <code>del pin inv restrict topics title:Tên</code>\n"
-        "<code>/rmadmin @u</code>         — Demote admin\n"
-        "<code>/warn [@u] [lý do]</code>  — Cảnh cáo (auto-ban lúc max)\n"
-        "<code>/warns [@u]</code>         — Xem số lần cảnh cáo\n"
-        "<code>/resetwarns @u</code>      — Reset cảnh cáo\n"
-        "<code>/feed [n]</code>           — n tin nhắn gần nhất (mặc định 5)\n\n"
-        "<b>💬 Hội thoại AI</b>\n"
-        "<code>/reset</code>   — Xóa lịch sử chat\n"
-        "<code>/sysreset</code> — Xóa tất cả lịch sử\n"
-        "<code>/model</code>   — Chọn model AI\n"
-        "<code>/plugins [on|off]</code> — Bật/tắt plugins\n"
-        "<code>/topic [on|off]</code>   — Topic isolation\n"
-        "<code>/status</code>  — Trạng thái bot\n\n"
-        f"<b>📋 Models</b>\n{model_lines}"
-    )
+    lines = [
+        t("help.title", lang), "",
+        f"<b>{t('help.mod', lang)}</b>",
+        t("help.del",          lang),
+        t("help.pin",          lang),
+        t("help.ban",          lang),
+        t("help.unban",        lang),
+        t("help.mute",         lang),
+        t("help.unmute",       lang),
+        t("help.addadmin",     lang),
+        t("help.addadmin.flags", lang),
+        t("help.rmadmin",      lang),
+        t("help.warn",         lang),
+        t("help.warns",        lang),
+        t("help.resetwarns",   lang),
+        t("help.feed",         lang),
+        "",
+        f"<b>{t('help.ai', lang)}</b>",
+        t("help.reset",        lang),
+        t("help.sysreset",     lang),
+        t("help.model",        lang),
+        t("help.plugins",      lang),
+        t("help.topic",        lang),
+        t("help.status",       lang),
+        t("help.lang",         lang),
+        "",
+        f"<b>{t('help.models.title', lang)}</b>\n{model_lines}",
+    ]
+    await _reply(update, "\n".join(lines))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -199,7 +203,7 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif args and args[0].lstrip("-").isdigit():
         target_id = int(args[0])
     else:
-        await _reply(update, "❌ Reply vào tin nhắn cần xóa hoặc cung cấp message ID.")
+        await _reply(update, t("need.reply", _lang(update)))
         return
 
     try:
@@ -210,7 +214,7 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     except Exception as e:
-        await _reply(update, f"❌ Xóa thất bại: <code>{e}</code>")
+        await _reply(update, t("del.fail", _lang(update), err=e))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -225,7 +229,7 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = (msg.text or "").split()[1:]
 
     if not msg.reply_to_message:
-        await _reply(update, "❌ Reply vào tin nhắn cần ghim.")
+        await _reply(update, t("need.reply.pin", _lang(update)))
         return
 
     silent = "silent" in args or "s" in args
@@ -240,7 +244,7 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     except Exception as e:
-        await _reply(update, f"❌ Ghim thất bại: <code>{e}</code>")
+        await _reply(update, t("pin.fail", _lang(update), err=e))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -256,18 +260,19 @@ async def cmd_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, rest = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update, "❌ Cung cấp @user hoặc reply vào tin nhắn của họ.")
+        await _reply(update, t("need.target", _lang(update)))
         return
 
     reason = " ".join(rest) if rest else ""
     try:
         await context.bot.ban_chat_member(chat_id=chat.id, user_id=uid)
-        text = f"🚫 Đã ban user <code>{uid}</code>"
+        lang = _lang(update)
+        text = t("ban.done", lang, uid=uid)
         if reason:
-            text += f"\n📋 Lý do: {reason}"
+            text += t("ban.reason", lang, reason=reason)
         await _reply(update, text)
     except Exception as e:
-        await _reply(update, f"❌ Ban thất bại: <code>{e}</code>")
+        await _reply(update, t("ban.fail", _lang(update), err=e))
 
 
 async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,14 +284,14 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, _ = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update, "❌ Cung cấp @user hoặc reply.")
+        await _reply(update, t("need.target", _lang(update)))
         return
     try:
         await context.bot.unban_chat_member(chat_id=chat.id, user_id=uid,
                                              only_if_banned=True)
-        await _reply(update, f"✅ Đã unban user <code>{uid}</code>.")
+        await _reply(update, t("unban.done", _lang(update), uid=uid))
     except Exception as e:
-        await _reply(update, f"❌ Unban thất bại: <code>{e}</code>")
+        await _reply(update, t("unban.fail", _lang(update), err=e))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -302,11 +307,7 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, rest = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update,
-            "❌ Cú pháp: <code>/mute @user &lt;thời gian&gt;</code>\n"
-            "Ví dụ: <code>/mute @user 1h</code> | <code>30s</code> | "
-            "<code>1d</code> | <code>1w</code> | <code>3m</code> | <code>1y</code>"
-        )
+        await _reply(update, t("mute.usage", _lang(update)))
         return
 
     # Duration from remaining args
@@ -321,10 +322,11 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.restrict_chat_member(
             chat_id=chat.id, user_id=uid, permissions=perms, until_date=until
         )
-        dur_label = _fmt_duration(secs) if secs else "vĩnh viễn"
-        await _reply(update, f"🔇 Đã mute <code>{uid}</code> — {dur_label}")
+        lang = _lang(update)
+        dur_label = _fmt_duration(secs) if secs else t("mute.perm", lang)
+        await _reply(update, t("mute.done", lang, uid=uid, dur=dur_label))
     except Exception as e:
-        await _reply(update, f"❌ Mute thất bại: <code>{e}</code>")
+        await _reply(update, t("mute.fail", _lang(update), err=e))
 
 
 async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,7 +338,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, _ = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update, "❌ Cung cấp @user hoặc reply.")
+        await _reply(update, t("need.target", _lang(update)))
         return
 
     perms = ChatPermissions(
@@ -352,7 +354,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await _reply(update, f"🔊 Đã unmute <code>{uid}</code>.")
     except Exception as e:
-        await _reply(update, f"❌ Unmute thất bại: <code>{e}</code>")
+        await _reply(update, t("unmute.fail", _lang(update), err=e))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -402,11 +404,7 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, rest = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update,
-            "❌ Cú pháp: <code>/addadmin @user [flags]</code>\n"
-            "Flags: <code>del pin inv restrict topics promote info video post title:Tên</code>\n"
-            "Không truyền flag → dùng quyền mặc định (del, pin, inv, video)"
-        )
+        await _reply(update, t("addadmin.usage", _lang(update)))
         return
 
     # Parse flags
@@ -443,16 +441,17 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat.id, user_id=uid, custom_title=title
             )
 
+        lang = _lang(update)
         granted = [k for k, v in perms.items() if v and k != "can_manage_chat"]
         flags_str = ", ".join(f"<code>{k.replace('can_','')}</code>" for k in granted)
-        text = f"👑 Đã promote <code>{uid}</code> thành admin"
+        text = t("addadmin.done", lang, uid=uid)
         if title:
-            text += f" (<b>{title}</b>)"
+            text += t("addadmin.title", lang, title=title)
         if flags_str:
-            text += f"\n📋 Quyền: {flags_str}"
+            text += t("addadmin.perms", lang, perms=flags_str)
         await _reply(update, text)
     except Exception as e:
-        await _reply(update, f"❌ Promote thất bại: <code>{e}</code>")
+        await _reply(update, t("addadmin.fail", _lang(update), err=e))
 
 
 async def cmd_rmadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -464,7 +463,7 @@ async def cmd_rmadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, _ = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update, "❌ Cung cấp @user hoặc reply.")
+        await _reply(update, t("need.target", _lang(update)))
         return
     try:
         await context.bot.promote_chat_member(
@@ -478,9 +477,9 @@ async def cmd_rmadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             can_invite_users       = False,
             can_pin_messages       = False,
         )
-        await _reply(update, f"🔽 Đã demote <code>{uid}</code> (xóa quyền admin).")
+        await _reply(update, t("rmadmin.done", _lang(update), uid=uid))
     except Exception as e:
-        await _reply(update, f"❌ Demote thất bại: <code>{e}</code>")
+        await _reply(update, t("rmadmin.fail", _lang(update), err=e))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -503,21 +502,19 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count  = state.warn_add(chat.id, uid)
     max_w  = state.get_max_warns()
 
-    text = (
-        f"⚠️ Đã cảnh cáo <code>{uid}</code> "
-        f"(<b>{count}/{max_w}</b>)"
-    )
+    lang = _lang(update)
+    text = t("warn.added", lang, uid=uid, count=count, max=max_w)
     if reason:
-        text += f"\n📋 Lý do: {reason}"
+        text += t("warn.reason", lang, reason=reason)
 
     if count >= max_w:
         # Auto-ban
         try:
             await context.bot.ban_chat_member(chat_id=chat.id, user_id=uid)
             state.warn_reset(chat.id, uid)
-            text += f"\n\n🚫 Đạt {max_w} cảnh cáo → Đã BAN tự động."
+            text += t("warn.banned", lang, max=max_w)
         except Exception as e:
-            text += f"\n\n❌ Auto-ban thất bại: <code>{e}</code>"
+            text += t("warn.ban_fail", lang, err=e)
 
     await _reply(update, text)
 
@@ -534,17 +531,17 @@ async def cmd_warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if uid:
             count = state.warn_get(chat.id, uid)
             max_w = state.get_max_warns()
-            await _reply(update,
-                f"⚠️ User <code>{uid}</code>: <b>{count}/{max_w}</b> cảnh cáo.")
+            await _reply(update, t("warns.single", _lang(update), uid=uid, count=count, max=max_w))
             return
 
     # Show all warned users in this chat
     all_warns = state.warn_get_all(chat.id)
     if not all_warns:
-        await _reply(update, "✅ Không có ai bị cảnh cáo trong chat này.")
+        await _reply(update, t("warns.none", _lang(update)))
         return
     max_w = state.get_max_warns()
-    lines = [f"⚠️ <b>Danh sách cảnh cáo</b> (max {max_w}):"]
+    lang = _lang(update)
+    lines = [t("warns.title", lang, max=max_w)]
     for uid, cnt in sorted(all_warns.items(), key=lambda x: -x[1]):
         lines.append(f"• <code>{uid}</code>: {cnt}/{max_w}")
     await _reply(update, "\n".join(lines))
@@ -559,10 +556,10 @@ async def cmd_resetwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, _ = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update, "❌ Cung cấp @user hoặc reply.")
+        await _reply(update, t("need.target", _lang(update)))
         return
     state.warn_reset(chat.id, uid)
-    await _reply(update, f"✅ Đã reset cảnh cáo của <code>{uid}</code>.")
+    await _reply(update, t("resetwarns.done", _lang(update), uid=uid))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -592,34 +589,89 @@ async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg  = update.message
     chat = update.effective_chat
+    lang = _get_lang(update)
     args = (msg.text or "").split()[1:]
+    is_private = chat.type == ChatType.PRIVATE
 
-    if chat.type == ChatType.PRIVATE:
-        await _reply(update, "❌ /feed chỉ hoạt động trong nhóm.")
-        return
+    # ── Resolve which group's feed to show ───────────────────
+    # Group chat  : /feed [n]            → current group
+    # Private chat: /feed <chat_id> [n]  → specified group
+    #               /feed [n]            → auto-select if only 1 group buffered
+    target_chat_id: int | None = None
+
+    if not is_private:
+        target_chat_id = chat.id
+    else:
+        # Try first arg as a group chat_id (negative int)
+        if args and args[0].lstrip("-").isdigit():
+            candidate = int(args[0])
+            if candidate < 0:           # valid group id
+                target_chat_id = candidate
+                args = args[1:]         # consume the chat_id arg
+        if target_chat_id is None:
+            available = state.feed_list_chats()
+            if len(available) == 1:
+                target_chat_id = available[0]
+            elif len(available) > 1:
+                ids_fmt = "\n".join(f"• <code>{cid}</code>" for cid in available)
+                usage = {
+                    "en": (
+                        "📋 Multiple groups in buffer. Specify one:\n"
+                        f"<code>/feed &lt;group_id&gt; [n]</code>\n\n"
+                        f"Available:\n{ids_fmt}"
+                    ),
+                    "vi": (
+                        "📋 Có nhiều nhóm trong buffer. Chỉ định nhóm cụ thể:\n"
+                        f"<code>/feed &lt;group_id&gt; [n]</code>\n\n"
+                        f"Có sẵn:\n{ids_fmt}"
+                    ),
+                }
+                await _reply(update, usage.get(lang, usage["en"]))
+                return
+            else:
+                no_data = {
+                    "en": (
+                        "📋 No feed data yet.\n"
+                        "Add the bot to a group with <code>GROUP_CONTEXT_ENABLED=true</code>, "
+                        "then use <code>/feed &lt;group_id&gt; [n]</code>."
+                    ),
+                    "vi": (
+                        "📋 Chưa có dữ liệu feed.\n"
+                        "Thêm bot vào nhóm với <code>GROUP_CONTEXT_ENABLED=true</code>, "
+                        "sau đó dùng <code>/feed &lt;group_id&gt; [n]</code>."
+                    ),
+                }
+                await _reply(update, no_data.get(lang, no_data["en"]))
+                return
 
     n       = int(args[0]) if (args and args[0].isdigit()) else 5
-    entries = state.feed_get(chat.id, n)
-    buf_sz  = state.feed_size(chat.id)
+    entries = state.feed_get(target_chat_id, n)
+    buf_sz  = state.feed_size(target_chat_id)
 
     if not entries:
-        await _reply(update,
-            "📋 Buffer trống — bot cần đọc tin nhắn nhóm trước.\n"
-            "Đảm bảo <code>GROUP_CONTEXT_ENABLED=true</code> trong config."
-        )
+        empty = {
+            "en": (
+                f"📋 Feed buffer for <code>{target_chat_id}</code> is empty.\n"
+                "Make sure <code>GROUP_CONTEXT_ENABLED=true</code> is set."
+            ),
+            "vi": (
+                f"📋 Buffer của <code>{target_chat_id}</code> trống.\n"
+                "Đảm bảo <code>GROUP_CONTEXT_ENABLED=true</code> trong config."
+            ),
+        }
+        await _reply(update, empty.get(lang, empty["en"]))
         return
 
-    # Header
-    await _reply(update,
-        f"📋 <b>{len(entries)} tin gần nhất</b> (buffer: {buf_sz}):"
-    )
+    header = {
+        "en": f"📋 <b>{len(entries)} recent messages</b> from <code>{target_chat_id}</code> (buffer: {buf_sz}):",
+        "vi": f"📋 <b>{len(entries)} tin gần nhất</b> từ <code>{target_chat_id}</code> (buffer: {buf_sz}):",
+    }
+    await _reply(update, header.get(lang, header["en"]))
 
-    # One message per entry with action keyboard
     for e in entries:
-        date_str = e.date.strftime("%Y-%m-%d %H:%M")
-        uhandle  = f" (@{e.username.lstrip('@')})" if e.username else ""
+        date_str     = e.date.strftime("%Y-%m-%d %H:%M")
+        uhandle      = f" (@{e.username.lstrip('@')})" if e.username else ""
         text_preview = e.text[:300] + ("…" if len(e.text) > 300 else "")
-
         caption = (
             f"📨 <b>#{e.msg_id}</b> | {date_str}\n"
             f"👤 {e.user_name}{uhandle}\n"
@@ -628,9 +680,9 @@ async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         try:
             await context.bot.send_message(
-                chat_id   = msg.chat_id,
-                text      = caption,
-                parse_mode= "HTML",
+                chat_id      = msg.chat_id,   # send to wherever /feed was called
+                text         = caption,
+                parse_mode   = "HTML",
                 reply_markup = _feed_keyboard(e),
             )
         except Exception as exc:
@@ -645,14 +697,14 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _owner_only(update):
         return
     state.clear(_get_conv_id(update))
-    await _reply(update, "🗑️ Đã xóa lịch sử hội thoại.")
+    await _reply(update, t("reset.done", _lang(update)))
 
 
 async def cmd_sysreset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _owner_only(update):
         return
     state.clear_all()
-    await _reply(update, "🗑️ Đã xóa <b>toàn bộ</b> lịch sử.")
+    await _reply(update, t("sysreset.done", _lang(update)))
 
 
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -664,7 +716,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if args and args[0] in MODELS:
         state.set_cfg(cid, model=args[0])
-        await _reply(update, f"✅ Đã đổi sang <b>{_MODEL_LABELS.get(args[0], args[0])}</b>")
+        await _reply(update, t("model.switched", _lang(update), label=_MODEL_LABELS.get(args[0], args[0])))
         return
 
     buttons = [
@@ -675,7 +727,7 @@ async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for m in MODELS
     ]
     await update.message.reply_text(
-        f"🤖 Model hiện tại: <code>{current}</code>\n\nChọn model:",
+        t("model.current", _lang(update), model=current),
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML",
     )
@@ -689,17 +741,18 @@ async def cmd_plugins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur  = cfg.get("plugins", ENABLE_PLUGINS)
     args = (update.message.text or "").split()[1:]
     if not args:
-        await _reply(update, f"🔌 Plugins: {'✅ Bật' if cur else '❌ Tắt'}\n"
-                     "Dùng <code>/plugins on</code> hoặc <code>/plugins off</code>.")
+        lang  = _lang(update)
+        state_str = t("plugins.enabled" if cur else "plugins.disabled", lang)
+        await _reply(update, t("plugins.status", lang, state=state_str))
         return
     if args[0].lower() in ("on", "1", "true", "bật"):
         state.set_cfg(cid, plugins=True)
-        await _reply(update, "🔌 Plugins: ✅ Đã bật")
+        await _reply(update, t("plugins.on", _lang(update)))
     elif args[0].lower() in ("off", "0", "false", "tắt"):
         state.set_cfg(cid, plugins=False)
-        await _reply(update, "🔌 Plugins: ❌ Đã tắt")
+        await _reply(update, t("plugins.off", _lang(update)))
     else:
-        await _reply(update, "Dùng <code>/plugins on</code> hoặc <code>/plugins off</code>.")
+        await _reply(update, t("plugins.usage", _lang(update)))
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -713,27 +766,35 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model = cfg.get("model", DEFAULT_MODEL)
     label = _MODEL_LABELS.get(model, model)
 
+    lang    = _lang(update)
     db_info = await db.stats()
     if db_info.get("ready"):
         cr, mr = db_info["conv_rows"], db_info["max_conv_rows"]
         pct    = int(cr / mr * 100) if mr else 0
         bar    = "█" * (pct // 10) + "░" * (10 - pct // 10)
-        db_line = f"\n\n🗄️ <b>PostgreSQL</b>\n   {cr:,} / {mr:,}  ({pct}%)\n   [{bar}]"
+        db_line = t("status.db.ok", lang, rows=cr, max_rows=mr, pct=pct, bar=bar)
     elif "error" in db_info:
-        db_line = f"\n\n🗄️ PostgreSQL: ❌ <code>{db_info['error'][:60]}</code>"
+        db_line = t("status.db.err", lang, err=db_info["error"][:60])
     else:
-        db_line = "\n\n🗄️ PostgreSQL: ⚠️ In-memory only"
+        db_line = t("status.db.off", lang)
 
-    feed_count = state.feed_size(chat.id) if chat.type != ChatType.PRIVATE else 0
+    if chat.type != ChatType.PRIVATE:
+        feed_count = state.feed_size(chat.id)
+    else:
+        feed_count = sum(state.feed_size(cid) for cid in state.feed_list_chats())
+    plug_icon   = "✅" if cfg.get("plugins", ENABLE_PLUGINS) else "❌"
+    follow_icon = "✅" if ENABLE_FOLLOWUP else "❌"
+    topic_icon  = "✅" if tm else "❌"
+    msgs_str    = t("status.msgs", lang, n=len(hist))
     await _reply(update,
-        f"📊 <b>Trạng thái</b>\n\n"
-        f"🆔 Conv   : <code>{cid}</code>\n"
-        f"📝 Lịch sử: {len(hist)} tin\n"
-        f"🤖 Model  : <b>{label}</b>\n"
-        f"🔌 Plugins: {'✅' if cfg.get('plugins', ENABLE_PLUGINS) else '❌'}\n"
-        f"💬 Followup: {'✅' if ENABLE_FOLLOWUP else '❌'}\n"
-        f"🏷️ Topic Mode: {'✅' if tm else '❌'}\n"
-        f"📋 Feed buffer: {feed_count} tin"
+        f"{t('status.title', lang)}\n\n"
+        f"{t('status.conv', lang)}   : <code>{cid}</code>\n"
+        f"{t('status.history', lang)}: {msgs_str}\n"
+        f"{t('status.model', lang)}  : <b>{label}</b>\n"
+        f"{t('status.plugins', lang)}: {plug_icon}\n"
+        f"{t('status.followup', lang)}: {follow_icon}\n"
+        f"{t('status.topic', lang)}: {topic_icon}\n"
+        f"{t('status.feed', lang)}: {feed_count} {t('status.msgs_unit', lang)}"
         f"{db_line}"
     )
 
@@ -743,19 +804,50 @@ async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat = update.effective_chat
     if chat.type == ChatType.PRIVATE:
-        await _reply(update, "❌ Topic Mode chỉ áp dụng cho nhóm.")
+        await _reply(update, t("topic.group_only", _lang(update)))
         return
     cur  = state.topic_mode(chat.id)
     args = (update.message.text or "").split()[1:]
     if not args:
-        await _reply(update, f"🏷️ Topic Mode: {'✅ Bật' if cur else '❌ Tắt'}\n"
-                     "Dùng <code>/topic on</code> hoặc <code>/topic off</code>.")
+        lang = _lang(update)
+        state_str = t("topic.on" if cur else "topic.off", lang).split(": ", 1)[1]
+        await _reply(update, t("topic.status", lang, state=state_str))
         return
     if args[0].lower() in ("on", "bật"):
         state.set_topic_mode(chat.id, True)
-        await _reply(update, "🏷️ Topic Mode: ✅ Đã bật")
+        await _reply(update, t("topic.on", _lang(update)))
     elif args[0].lower() in ("off", "tắt"):
         state.set_topic_mode(chat.id, False)
-        await _reply(update, "🏷️ Topic Mode: ❌ Đã tắt")
+        await _reply(update, t("topic.off", _lang(update)))
     else:
-        await _reply(update, "Dùng <code>/topic on</code> hoặc <code>/topic off</code>.")
+        await _reply(update, t("topic.usage", _lang(update)))
+
+# ─────────────────────────────────────────────────────────────
+# /lang  — switch UI + AI language
+# ─────────────────────────────────────────────────────────────
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    cid  = _get_conv_id(update)
+    cfg  = state.get_cfg(cid)
+    cur  = cfg.get("lang", DEFAULT_LANG)
+    args = (update.message.text or "").split()[1:]
+
+    if not args:
+        await _reply(update, t(
+            "lang.current", cur,
+            lang=f"<code>{cur}</code>",
+            list=lang_list_str(),
+        ))
+        return
+
+    code = args[0].lower().strip()
+    if code not in SUPPORTED:
+        await _reply(update, t("lang.invalid", cur, list=", ".join(SUPPORTED)))
+        return
+
+    # Switch language + clear history so AI starts fresh in new lang
+    state.set_cfg(cid, lang=code)
+    state.clear(cid)
+    await _reply(update, t("lang.set", code, name=lang_name(code)))

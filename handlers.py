@@ -31,6 +31,8 @@ import state
 from state import FeedEntry
 import utils
 from agent import build_system_prompt, generate_followup, run_agent
+from i18n import t
+from config import DEFAULT_LANG
 from config import (
     ENABLE_FOLLOWUP,
     ENABLE_PLUGINS,
@@ -221,9 +223,9 @@ async def _send_chunks(
 # Background follow-up attach
 # ─────────────────────────────────────────────────────────────
 
-async def _attach_followup(last_msg: Message, history: list, response: str):
+async def _attach_followup(last_msg: Message, history: list, response: str, lang: str = DEFAULT_LANG):
     try:
-        follow_ups = await generate_followup(history, response, FOLLOWUP_COUNT)
+        follow_ups = await generate_followup(history, response, FOLLOWUP_COUNT, lang=lang)
         if not follow_ups:
             return
         cache_key = _fq_store(follow_ups)
@@ -258,20 +260,21 @@ async def _process(
     cid         = state.conv_id(chat_id, user_id, thread_id, is_private,
                                 state.topic_mode(chat_id))
     cfg         = state.get_cfg(cid)
+    lang        = cfg.get("lang", DEFAULT_LANG)
     model_pref  = cfg.get("model")
     use_plugins = cfg.get("plugins", ENABLE_PLUGINS)
     custom_sys  = cfg.get("system_prompt")
 
     tg_ctx        = _make_tg_ctx(bot, chat_id, user_id, message_id,
                                  thread_id, chat_title, user_name)
-    system_prompt = custom_sys or build_system_prompt(tg_ctx)
+    system_prompt = custom_sys or build_system_prompt(tg_ctx, lang=lang)
     history       = state.get_history(cid)
 
     status_msg: Optional[Message] = None
     try:
         status_msg = await bot.send_message(
             chat_id           = chat_id,
-            text              = "⏳ Đang xử lý…",
+            text              = t("processing", lang),
             message_thread_id = thread_id,
         )
     except Exception:
@@ -299,7 +302,7 @@ async def _process(
         )
     except Exception as e:
         logger.error("run_agent error: %s", e, exc_info=True)
-        response = "❌ Có lỗi xảy ra khi xử lý. Thử lại nhé."
+        response = t("error.agent", lang)
     finally:
         typing_task.cancel()
         if status_msg:
@@ -317,7 +320,7 @@ async def _process(
 
     if ENABLE_FOLLOWUP and sent:
         asyncio.create_task(
-            _attach_followup(sent[-1], state.get_history(cid), response)
+            _attach_followup(sent[-1], state.get_history(cid), response, lang=lang)
         )
 
 
@@ -469,11 +472,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_priv   = chat.type == ChatType.PRIVATE
         cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
                                   state.topic_mode(chat.id))
+        # get lang for this conv
+        thread_id = getattr(msg, "message_thread_id", None)
+        is_priv   = chat.type == ChatType.PRIVATE
+        cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
+                                  state.topic_mode(chat.id))
         state.set_cfg(cid, model=model_name)
+        _lang = state.get_cfg(cid).get("lang", DEFAULT_LANG)
         label = _MODEL_LABELS.get(model_name, model_name)
         try:
             await query.edit_message_text(
-                f"✅ Đã chuyển sang <b>{label}</b>",
+                t("model.switched", _lang, label=label),
                 parse_mode="HTML",
             )
         except Exception:
@@ -496,7 +505,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (ValueError, TypeError):
             question = None
         if not question:
-            await query.answer("❌ Câu hỏi đã hết hạn.", show_alert=True)
+            # Get lang for expired followup message
+            _fc_chat = query.message.chat if query.message else None
+            _fc_tid  = getattr(query.message, "message_thread_id", None) if query.message else None
+            _fc_priv = (_fc_chat.type == ChatType.PRIVATE) if _fc_chat else True
+            _fc_cid  = state.conv_id(_fc_chat.id if _fc_chat else 0, OWNER_ID,
+                                     _fc_tid, _fc_priv, False)
+            _fc_lang = state.get_cfg(_fc_cid).get("lang", DEFAULT_LANG)
+            await query.answer(
+                "❌ Question expired." if _fc_lang == "en" else "❌ Câu hỏi đã hết hạn.",
+                show_alert=True
+            )
             return
 
         user      = query.from_user

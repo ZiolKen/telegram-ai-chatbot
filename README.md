@@ -20,6 +20,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | **Edit messages** | Edit bot's own text *and* media messages — auto-detects text vs caption |
 | **Group context** | Reads and stores **all** messages from everyone in a group; AI always has full conversation context |
 | **Topic isolation** | Per-topic history and config in Supergroups with Topics |
+| **Language** | Full bilingual support: `en` (English) and `vi` (Vietnamese). Switches UI strings, slash-command replies, and the Gemini system prompt so AI responds in the selected language. Per-conversation setting, stored in DB. |
 | **Follow-up** | Auto-generates 3 clickable follow-up questions after each response |
 | **Persistence** | Full conversation history and config stored in PostgreSQL; survives restarts |
 
@@ -27,7 +28,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.12+
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - One or more [Gemini API keys](https://aistudio.google.com/app/apikey)
 - A PostgreSQL database (Aiven, Neon, Supabase, Render Postgres, or any standard instance)
@@ -58,6 +59,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | `GROUP_CONTEXT_ENABLED` | `true` | Store all group messages (from everyone) as shared context |
 | `FILE_CACHE_MAX_MB` | `256` | RAM limit for the in-memory file cache (MB) |
 | `ENABLE_PLUGINS` | `true` | Enable all tools/plugins globally |
+| `DEFAULT_LANG` | `en` | Default bot language (`en` = English, `vi` = Vietnamese). Override per-conversation with `/lang` |
 | `ENABLE_FOLLOWUP` | `true` | Generate follow-up question buttons after responses |
 | `FOLLOWUP_COUNT` | `3` | Number of follow-up questions to generate |
 | `MESSAGE_MERGE_DELAY` | `1.5` | Seconds to wait before processing, to merge rapid consecutive messages |
@@ -110,6 +112,7 @@ All commands are **owner-only**.
 |---|---|
 | `/start` | Introduction message |
 | `/help` | Show all commands |
+| `/lang en\|vi` | Switch bot language (UI + AI prompt). Default: `en` |
 | `/reset` | Clear conversation history for this chat/topic |
 | `/sysreset` | Clear **all** conversation history (every chat) |
 | `/model` | Show current model with an inline keyboard to switch |
@@ -117,6 +120,18 @@ All commands are **owner-only**.
 | `/plugins on\|off` | Enable or disable all tools for this conversation |
 | `/status` | Show current model, history length, plugin state, DB usage |
 | `/topic on\|off` | Toggle topic isolation mode (groups only) |
+| `/del [id]` | Delete a message — reply to it or pass a message ID |
+| `/pin [silent]` | Pin the replied-to message; add `silent` to skip notification |
+| `/ban [@user] [reason]` | Permanently ban a user |
+| `/unban @user` | Unban a user |
+| `/mute [@user] <duration>` | Mute a user (`30s`, `5m`, `2h`, `1d`, `1w`, `3mo`, `1y`; omit = permanent) |
+| `/unmute @user` | Restore full messaging rights |
+| `/addadmin [@user] [flags]` | Promote a user to admin. Flags: `del pin inv restrict topics promote info video post title:Name` |
+| `/rmadmin @user` | Remove all admin rights from a user |
+| `/warn [@user] [reason]` | Warn a user. Automatically bans when max warns is reached |
+| `/warns [@user]` | Show warn count for a user (or all warned users) |
+| `/resetwarns @user` | Reset all warns for a user |
+| `/feed [n]` | Show last *n* messages from the group context buffer (default 5) |
 
 ---
 
@@ -206,7 +221,7 @@ The agent automatically falls back to the next model/key if a request fails or h
 | `tg_unpin_message` | Unpin a specific message or all messages |
 | `tg_ban_user` | Permanently ban a user |
 | `tg_unban_user` | Unban a user |
-| `tg_mute_user` | Restrict a user from sending messages (duration in minutes, 0 = permanent) |
+| `tg_mute_user` | Restrict a user from sending messages. Duration as a string: `30s`, `5m`, `2h`, `1d`, `1w`, `3mo`, `1y`. Omit for permanent. |
 | `tg_unmute_user` | Restore full messaging rights |
 
 ### Telegram — Admin & Chat Management

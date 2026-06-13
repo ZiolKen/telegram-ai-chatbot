@@ -44,6 +44,7 @@ from config import (
 )
 from commands import (
     cmd_help, cmd_model, cmd_plugins,
+    cmd_lang,
     cmd_reset, cmd_start, cmd_status,
     cmd_sysreset, cmd_topic,
     # New moderation commands
@@ -88,6 +89,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("plugins",  cmd_plugins))
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("topic",    cmd_topic))
+    app.add_handler(CommandHandler("lang",     cmd_lang))
     # ── Moderation commands ───────────────────────────────────
     app.add_handler(CommandHandler("del",        cmd_del))
     app.add_handler(CommandHandler("pin",        cmd_pin))

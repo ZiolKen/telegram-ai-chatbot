@@ -54,5 +54,10 @@ GROUP_CONTEXT_ENABLED: bool = os.getenv("GROUP_CONTEXT_ENABLED", "true").lower()
 # khi vượt giới hạn. Cache xóa hoàn toàn khi Render restart.
 FILE_CACHE_MAX_MB: int = int(os.getenv("FILE_CACHE_MAX_MB", "256"))
 
+# ── Language ─────────────────────────────────────────────────────────────
+# Default UI + AI prompt language for new conversations.
+# Per-conversation lang overrides this (stored in DB via conv_cfg).
+DEFAULT_LANG: str = os.getenv("DEFAULT_LANG", "en")   # "en" | "vi"
+
 # ── Data dir ─────────────────────────────────────────────────────────────
 DATA_DIR: str = "data"
