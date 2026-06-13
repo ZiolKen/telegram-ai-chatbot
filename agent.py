@@ -182,10 +182,25 @@ async def run_agent(
 
                     try:
                         candidate = resp["candidates"][0]
-                        content   = candidate["content"]
-                        parts     = content.get("parts", [])
-                    except (KeyError, IndexError):
-                        logger.error("Unexpected Gemini response: %s", str(resp)[:300])
+                    except IndexError:
+                        logger.error("Gemini: empty candidates list — %s", str(resp)[:200])
+                        break
+
+                    # Detect safety/recitation blocks before accessing 'content'
+                    finish_reason = candidate.get("finishReason", "")
+                    if finish_reason in ("SAFETY", "RECITATION"):
+                        logger.warning("Gemini blocked response: finishReason=%s", finish_reason)
+                        return (
+                            "⚠️ Gemini từ chối trả lời do chính sách an toàn nội dung."
+                            if finish_reason == "SAFETY"
+                            else "⚠️ Gemini từ chối trả lời do nội dung vi phạm bản quyền."
+                        )
+
+                    try:
+                        content = candidate["content"]
+                        parts   = content.get("parts", [])
+                    except KeyError:
+                        logger.error("Gemini: no 'content' in candidate — %s", str(candidate)[:200])
                         break
 
                     fn_calls   = [p for p in parts if "functionCall" in p]

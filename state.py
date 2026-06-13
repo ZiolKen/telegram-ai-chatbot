@@ -19,11 +19,17 @@ def _fire(coro) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        coro.close(); return
+        coro.close()
+        return
     task = loop.create_task(coro)
-    task.add_done_callback(
-        lambda t: t.exception() if not t.cancelled() and t.exception() else None
-    )
+
+    def _on_done(t: asyncio.Task) -> None:
+        if not t.cancelled():
+            exc = t.exception()
+            if exc:
+                _log.warning("[state] background DB write failed: %s", exc)
+
+    task.add_done_callback(_on_done)
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def is_owner(uid: int) -> bool:
@@ -39,8 +45,31 @@ pending_tasks: dict[str, asyncio.Task] = {}
 
 # Pending manual feed replies triggered by the ↩️ Reply button.
 # key   : (private_chat_id, prompt_msg_id)  — the ForceReply prompt bot sent
-# value : {"group_chat_id": int, "target_msg_id": int}
+# value : {"group_chat_id": int, "target_msg_id": int, "expires": float}
 pending_feed_replies: dict[tuple[int, int], dict] = {}
+_FEED_REPLY_TTL = 300  # seconds — expire after 5 min of no response
+
+
+def feed_reply_set(chat_id: int, msg_id: int, group_chat_id: int, target_msg_id: int) -> None:
+    import time as _t
+    # Evict expired entries first
+    now = _t.monotonic()
+    expired = [k for k, v in pending_feed_replies.items() if now > v["expires"]]
+    for k in expired:
+        pending_feed_replies.pop(k, None)
+    pending_feed_replies[(chat_id, msg_id)] = {
+        "group_chat_id": group_chat_id,
+        "target_msg_id": target_msg_id,
+        "expires":       now + _FEED_REPLY_TTL,
+    }
+
+
+def feed_reply_pop(chat_id: int, msg_id: int) -> dict | None:
+    import time as _t
+    entry = pending_feed_replies.pop((chat_id, msg_id), None)
+    if entry and _t.monotonic() > entry["expires"]:
+        return None  # Expired — discard
+    return entry
 
 # ── Feed buffer  (per group) ─────────────────────────────────────────────────
 MAX_FEED_BUFFER = 100

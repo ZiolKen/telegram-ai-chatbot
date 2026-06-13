@@ -584,6 +584,26 @@ def _feed_keyboard(entry: "state.FeedEntry") -> InlineKeyboardMarkup:
     ])
 
 
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel a pending feed-reply ForceReply prompt."""
+    if not _owner_only(update):
+        return
+    msg  = update.message
+    chat = update.effective_chat
+    # Cancel any pending_feed_reply for this chat
+    # (scan all keys matching this chat_id)
+    removed = [
+        k for k in list(state.pending_feed_replies.keys())
+        if k[0] == chat.id
+    ]
+    for k in removed:
+        state.pending_feed_replies.pop(k, None)
+    if removed:
+        await _reply(update, "✅ Đã hủy feed reply đang chờ.")
+    else:
+        await _reply(update, "ℹ️ Không có feed reply nào đang chờ.")
+
+
 async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _owner_only(update):
         return

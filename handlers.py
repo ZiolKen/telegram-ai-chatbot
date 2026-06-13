@@ -407,8 +407,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ta forward ngay tin nhắn đó vào nhóm rồi return — không qua AI.
     if msg.reply_to_message:
         feed_key = (chat.id, msg.reply_to_message.message_id)
-        if feed_key in state.pending_feed_replies:
-            pending   = state.pending_feed_replies.pop(feed_key)
+        pending = state.feed_reply_pop(chat.id, msg.reply_to_message.message_id)
+        if pending is not None:
             reply_text = msg.text or msg.caption or ""
             if reply_text.strip():
                 try:
@@ -503,11 +503,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_priv   = chat.type == ChatType.PRIVATE
         cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
                                   state.topic_mode(chat.id))
-        # get lang for this conv
-        thread_id = getattr(msg, "message_thread_id", None)
-        is_priv   = chat.type == ChatType.PRIVATE
-        cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
-                                  state.topic_mode(chat.id))
         state.set_cfg(cid, model=model_name)
         _lang = state.get_cfg(cid).get("lang", DEFAULT_LANG)
         label = _MODEL_LABELS.get(model_name, model_name)
@@ -586,7 +581,7 @@ async def _handle_feed_action(
     context: ContextTypes.DEFAULT_TYPE,
     data: str,
 ) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from telegram import ChatPermissions
 
     parts = data.split(":")
@@ -646,11 +641,8 @@ async def _handle_feed_action(
                     input_field_placeholder = "Nhập nội dung reply...",
                 ),
             )
-            # Store the pending context so handle_message can pick it up
-            state.pending_feed_replies[(prompt_chat_id, prompt_msg.message_id)] = {
-                "group_chat_id": chat_id,
-                "target_msg_id": tgt_id,
-            }
+            # Store the pending context so handle_message can pick it up (5-min TTL)
+            state.feed_reply_set(prompt_chat_id, prompt_msg.message_id, chat_id, tgt_id)
             await query.answer("✏️ Hãy nhập tin nhắn reply.")
         except Exception as e:
             await query.answer(f"❌ {e}", show_alert=True)
@@ -675,7 +667,7 @@ async def _handle_feed_action(
 
     # ── mute ─────────────────────────────────────────────────
     elif action == "mute":
-        until = datetime.now(tz=timezone.utc) + __import__("datetime").timedelta(hours=1)
+        until = datetime.now(tz=timezone.utc) + timedelta(hours=1)
         perms = ChatPermissions(can_send_messages=False)
         try:
             await bot.restrict_chat_member(

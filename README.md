@@ -14,7 +14,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | **Code** | Safe Python sandbox — subprocess with 15s timeout, AST security scan, no network/filesystem access |
 | **Messaging** | Send text, photos, stickers, GIFs, polls, dice to any chat or channel |
 | **Files** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 256 MB |
-| **Moderation** | Ban, unban, mute, unmute users; warn system with configurable auto-ban threshold; `/feed` buffer with inline moderation buttons (reply/del/pin/warn/mute/ban) |
+| **Moderation** | Ban, unban, mute, unmute users; warn system with auto-ban at 3 warnings (default); `/feed` buffer (last 100 messages) with inline action buttons — the **Reply** button sends a ForceReply prompt so you can type a response that gets forwarded to the original group message without leaving your private chat |
 | **Admin** | Promote/demote admins (with granular permission flags + custom title), pin/unpin messages, delete messages, forward, copy |
 | **Chat mgmt** | Set title/description, get chat/user info, member count, create invite links, invite/remove users, leave chats, send media albums |
 | **Edit messages** | Edit bot's own text *and* media messages — auto-detects text vs caption |
@@ -128,10 +128,11 @@ All commands are **owner-only**.
 | `/unmute @user` | Restore full messaging rights |
 | `/addadmin [@user] [flags]` | Promote a user to admin. Flags: `del pin inv restrict topics promote info video post title:Name` |
 | `/rmadmin @user` | Remove all admin rights from a user |
-| `/warn [@user] [reason]` | Warn a user. Automatically bans when max warns is reached |
+| `/warn [@user] [reason]` | Warn a user. Automatically bans when max warns is reached (default: **3**) |
 | `/warns [@user]` | Show warn count for a user (or all warned users) |
 | `/resetwarns @user` | Reset all warns for a user |
-| `/feed [group_id] [n]` | Show last *n* messages from a group's context buffer (default 5). In private chat, pass the group's `chat_id` (auto-selected if only one group is buffered) |
+| `/feed [group_id] [n]` | Show last *n* messages from a group's context buffer (default 5, max 100). In private chat, pass the group's `chat_id` (auto-selected if only one group is buffered). Action buttons: **Reply** → ForceReply prompt (type to send a reply into the group), **Del**, **Pin**, **Warn**, **Mute**, **Ban** |
+| `/cancel` | Cancel a pending ForceReply prompt started by the `/feed` Reply button |
 
 ---
 
@@ -361,6 +362,8 @@ tg_send_document(url="https://...")
 - The in-memory file cache is cleared on every Render restart. Telegram `file_id` values remain valid across restarts and can be reused.
 - Conversation history is persisted in PostgreSQL and restored on startup, so context survives restarts.
 - The `MAX_CONV_ROWS` limit prunes the oldest rows in the `conversations` table to prevent unbounded growth.
+- The `/feed` buffer holds the last **100 messages** per group (in-memory, cleared on restart). `GROUP_CONTEXT_ENABLED=true` is required to populate it.
+- The warn system auto-bans a user when they accumulate **3 warnings** (default). The `/feed` Reply button works by sending a ForceReply prompt to the owner; use `/cancel` to abort it.
 
 ---
 

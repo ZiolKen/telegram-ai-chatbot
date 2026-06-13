@@ -53,7 +53,7 @@ from commands import (
     cmd_mute, cmd_unmute,
     cmd_addadmin, cmd_rmadmin,
     cmd_warn, cmd_warns, cmd_resetwarns,
-    cmd_feed,
+    cmd_feed, cmd_cancel,
 )
 from handlers import handle_callback, handle_message
 
@@ -103,6 +103,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("warns",      cmd_warns))
     app.add_handler(CommandHandler("resetwarns", cmd_resetwarns))
     app.add_handler(CommandHandler("feed",       cmd_feed))
+    app.add_handler(CommandHandler("cancel",     cmd_cancel))
     app.add_handler(MessageHandler(
         (
             filters.TEXT
