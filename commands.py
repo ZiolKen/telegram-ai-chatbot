@@ -413,11 +413,11 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_flags = False
 
     for token in rest:
-        t = token.lower()
-        if t.startswith("title:"):
+        tok = token.lower()
+        if tok.startswith("title:"):
             title     = token[6:][:16]
-        elif t in _PERM_FLAGS:
-            perms[_PERM_FLAGS[t]] = True
+        elif tok in _PERM_FLAGS:
+            perms[_PERM_FLAGS[tok]] = True
             has_flags = True
         else:
             # Ignore unknown tokens (e.g. leftover reason text)
@@ -589,7 +589,7 @@ async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg  = update.message
     chat = update.effective_chat
-    lang = _get_lang(update)
+    lang = _lang(update)
     args = (msg.text or "").split()[1:]
     is_private = chat.type == ChatType.PRIVATE
 
@@ -837,7 +837,7 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         await _reply(update, t(
             "lang.current", cur,
-            lang=f"<code>{cur}</code>",
+            name=lang_name(cur),
             list=lang_list_str(),
         ))
         return

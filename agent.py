@@ -107,21 +107,30 @@ async def _dispatch(
     if status_cb:
         asyncio.create_task(status_cb(name))
 
-    if name == "web_search":
-        result = await web_search(args.get("query", ""), args.get("engine", "duckduckgo"))
-    elif name == "fetch_url":
-        result = await fetch_url(args.get("url", ""))
-    elif name == "arxiv_search":
-        result = await arxiv_search(args.get("query", ""), args.get("max_results", 3))
-    elif name == "run_python":
-        result = await run_python(args.get("code", ""))
-    elif name in TG_HANDLERS:
-        if not tg_ctx:
-            return "⚠️ Không có Telegram context."
-        fn = TG_HANDLERS[name]
-        result = await fn(tg_ctx, **{k: v for k, v in args.items()})
-    else:
-        return f"⚠️ Tool không xác định: {name}"
+    try:
+        if name == "web_search":
+            result = await web_search(args.get("query", ""), args.get("engine", "duckduckgo"))
+        elif name == "fetch_url":
+            result = await fetch_url(args.get("url", ""))
+        elif name == "arxiv_search":
+            result = await arxiv_search(args.get("query", ""), args.get("max_results", 3))
+        elif name == "run_python":
+            result = await run_python(args.get("code", ""))
+        elif name in TG_HANDLERS:
+            if not tg_ctx:
+                return "⚠️ Không có Telegram context."
+            fn = TG_HANDLERS[name]
+            result = await fn(tg_ctx, **{k: v for k, v in args.items()})
+        else:
+            return f"⚠️ Tool không xác định: {name}"
+    except TypeError as e:
+        # Model passed unexpected/malformed arguments — surface as a tool
+        # result so the agent can retry instead of crashing the whole turn.
+        logger.error("Tool arg error %s(%s): %s", name, str(args)[:200], e)
+        return f"❌ Tool '{name}' nhận tham số không hợp lệ: {e}"
+    except Exception as e:
+        logger.error("Tool execution error %s: %s", name, e, exc_info=True)
+        return f"❌ Lỗi khi thực thi tool '{name}': {e}"
 
     # Trim large results (#12)
     if len(result) > MAX_TOOL_RESULT_CHARS:
@@ -183,7 +192,8 @@ async def run_agent(
                     text_parts = [p.get("text", "") for p in parts if "text" in p]
 
                     if not fn_calls:
-                        return "\n".join(text_parts).strip()
+                        text = "\n".join(text_parts).strip()
+                        return text or "🤔 (no response)"
 
                     # Execute all requested tools
                     fn_responses = []
@@ -315,7 +325,13 @@ def build_system_prompt(tg_ctx: TelegramContext, lang: str = DEFAULT_LANG) -> st
 👥 tg_get_chat_members_count — Count members
 🎲 tg_send_dice      — Dice / game emoji
 👑 tg_promote_admin / tg_demote_admin — Grant/revoke admin rights
-✏️ tg_set_chat_title / tg_set_chat_description — Edit chat"""
+🏷️ tg_set_user_title — Set custom admin title
+✏️ tg_set_chat_title / tg_set_chat_description — Edit chat
+🖼️ tg_send_media_group — Send an album of up to 10 photos/videos
+👤 tg_get_user_info  — Get user info (name, username, status)
+🔗 tg_create_invite_link — Create a group/channel invite link
+➕ tg_invite_user    — Add a user directly to a chat
+🚪 tg_leave_chat     — Leave a group/channel"""
 
     return f"""{persona}
 

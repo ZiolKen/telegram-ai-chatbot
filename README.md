@@ -14,14 +14,14 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | **Code** | Safe Python sandbox — subprocess with 15s timeout, AST security scan, no network/filesystem access |
 | **Messaging** | Send text, photos, stickers, GIFs, polls, dice to any chat or channel |
 | **Files** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 256 MB |
-| **Moderation** | Ban, unban, mute, unmute users |
-| **Admin** | Promote/demote admins, pin/unpin messages, delete messages, forward, copy |
-| **Chat mgmt** | Set title/description, get chat info, member count |
+| **Moderation** | Ban, unban, mute, unmute users; warn system with configurable auto-ban threshold; `/feed` buffer with inline moderation buttons (reply/del/pin/warn/mute/ban) |
+| **Admin** | Promote/demote admins (with granular permission flags + custom title), pin/unpin messages, delete messages, forward, copy |
+| **Chat mgmt** | Set title/description, get chat/user info, member count, create invite links, invite/remove users, leave chats, send media albums |
 | **Edit messages** | Edit bot's own text *and* media messages — auto-detects text vs caption |
 | **Group context** | Reads and stores **all** messages from everyone in a group; AI always has full conversation context |
 | **Topic isolation** | Per-topic history and config in Supergroups with Topics |
 | **Language** | Full bilingual support: `en` (English) and `vi` (Vietnamese). Switches UI strings, slash-command replies, and the Gemini system prompt so AI responds in the selected language. Per-conversation setting, stored in DB. |
-| **Follow-up** | Auto-generates 3 clickable follow-up questions after each response |
+| **Follow-up** | Auto-generates clickable follow-up questions after each response (count configurable via `FOLLOWUP_COUNT`, default 3) |
 | **Persistence** | Full conversation history and config stored in PostgreSQL; survives restarts |
 
 ---
@@ -124,14 +124,14 @@ All commands are **owner-only**.
 | `/pin [silent]` | Pin the replied-to message; add `silent` to skip notification |
 | `/ban [@user] [reason]` | Permanently ban a user |
 | `/unban @user` | Unban a user |
-| `/mute [@user] <duration>` | Mute a user (`30s`, `5m`, `2h`, `1d`, `1w`, `3mo`, `1y`; omit = permanent) |
+| `/mute [@user] <duration>` | Mute a user (`30s`, `5m`, `2h`, `1d`, `1w`, `3mo`, `1y`; omit = permanent. Note: `m`=minutes, `mo`=months) |
 | `/unmute @user` | Restore full messaging rights |
 | `/addadmin [@user] [flags]` | Promote a user to admin. Flags: `del pin inv restrict topics promote info video post title:Name` |
 | `/rmadmin @user` | Remove all admin rights from a user |
 | `/warn [@user] [reason]` | Warn a user. Automatically bans when max warns is reached |
 | `/warns [@user]` | Show warn count for a user (or all warned users) |
 | `/resetwarns @user` | Reset all warns for a user |
-| `/feed [n]` | Show last *n* messages from the group context buffer (default 5) |
+| `/feed [group_id] [n]` | Show last *n* messages from a group's context buffer (default 5). In private chat, pass the group's `chat_id` (auto-selected if only one group is buffered) |
 
 ---
 
@@ -141,14 +141,14 @@ All commands are **owner-only**.
 Message the bot directly — it always responds.
 
 ### Group / Supergroup
-The bot responds when:
+The bot only responds to the **owner** (`OWNER_ID`), and only when:
 - You **@mention** it: `@YourBot summarize this thread`
 - You **reply** to one of its messages
-- You are the owner (always triggers a response)
 
-When `GROUP_CONTEXT_ENABLED=true` (the default), the bot silently stores messages from all
-other users in a shared conversation history. This gives the AI full context about the ongoing
-conversation without responding to everyone.
+Messages from other users never trigger a response, but with `GROUP_CONTEXT_ENABLED=true`
+(the default) they are silently stored as shared context, giving the AI full visibility into
+the ongoing conversation without responding to everyone. Slash commands (e.g. `/ban`, `/del`)
+still work regardless of mention/reply.
 
 ### Topic Mode (Supergroup with Topics enabled)
 Run `/topic on` in the group. Each forum topic gets its own isolated conversation history
@@ -202,6 +202,7 @@ The agent automatically falls back to the next model/key if a request fails or h
 | `tg_send_animation` | Send a GIF or animation via `file_id` or `.gif`/`.mp4` URL |
 | `tg_send_poll` | Create an interactive poll |
 | `tg_send_dice` | Send an animated emoji game (🎲 🎯 🏀 ⚽ 🎳 🎰) |
+| `tg_send_media_group` | Send an album of up to 10 photos/videos in one message (via URL or `file_id`) |
 | `tg_forward_message` | Forward a message to another chat |
 | `tg_copy_message` | Copy a message without the "Forwarded from" label |
 
@@ -221,19 +222,24 @@ The agent automatically falls back to the next model/key if a request fails or h
 | `tg_unpin_message` | Unpin a specific message or all messages |
 | `tg_ban_user` | Permanently ban a user |
 | `tg_unban_user` | Unban a user |
-| `tg_mute_user` | Restrict a user from sending messages. Duration as a string: `30s`, `5m`, `2h`, `1d`, `1w`, `3mo`, `1y`. Omit for permanent. |
+| `tg_mute_user` | Restrict a user from sending messages for `duration_minutes` (0 = permanent) |
 | `tg_unmute_user` | Restore full messaging rights |
 
 ### Telegram — Admin & Chat Management
 
 | Tool | Description |
 |---|---|
-| `tg_promote_admin` | Grant admin rights to a user (configurable permissions) |
+| `tg_promote_admin` | Grant admin rights to a user (configurable permissions + custom title) |
 | `tg_demote_admin` | Remove all admin rights from a user |
+| `tg_set_user_title` | Set a custom admin title for a user |
 | `tg_set_chat_title` | Change the group or channel title |
 | `tg_set_chat_description` | Update the group or channel description |
 | `tg_get_chat_info` | Get name, ID, type, username, description of a chat |
 | `tg_get_chat_members_count` | Get the member count of a group or channel |
+| `tg_get_user_info` | Get a user's name, ID, username, and membership status in a chat |
+| `tg_create_invite_link` | Create an invite link (optional name, expiry, member limit, join-request mode) |
+| `tg_invite_user` | Add a user directly to a group/channel (requires Invite Users permission) |
+| `tg_leave_chat` | Make the bot leave a group or channel |
 
 ---
 
@@ -280,12 +286,13 @@ main.py           Entry point — webhook server (aiohttp) + PTB bot
 db.py             Standalone DB setup script + asyncpg connection pool
 config.py         All configuration from environment variables
 state.py          In-memory state with fire-and-forget PostgreSQL writes
+i18n.py           Bilingual (en/vi) UI string tables
 agent.py          Gemini API loop — multi-turn function calling
 handlers.py       Message accumulation, context storage, response dispatch
 commands.py       Slash command handlers
 tools_web.py      web_search, fetch_url, arxiv_search
 tools_code.py     run_python (sandboxed subprocess + AST security scan)
-tools_telegram.py 26 Telegram action tools
+tools_telegram.py 30 Telegram action tools
 file_cache.py     In-RAM file cache (LRU eviction, no disk/DB writes)
 utils.py          md_to_html, split_message, merge
 ```

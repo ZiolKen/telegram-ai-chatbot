@@ -332,13 +332,19 @@ async def _delayed_dispatch(
     bot, accu_key, chat_id, user_id, message_id,
     thread_id, is_private, chat_title, user_name, reply_to_id,
 ):
-    await asyncio.sleep(MESSAGE_MERGE_DELAY)
-    msgs = state.pending_texts.pop(accu_key, [])
-    if not msgs:
-        return
-    merged = utils.merge(msgs)
-    await _process(bot, chat_id, user_id, message_id, thread_id,
-                   is_private, chat_title, user_name, merged, reply_to_id)
+    try:
+        await asyncio.sleep(MESSAGE_MERGE_DELAY)
+        msgs = state.pending_texts.pop(accu_key, [])
+        if not msgs:
+            return
+        merged = utils.merge(msgs)
+        await _process(bot, chat_id, user_id, message_id, thread_id,
+                       is_private, chat_title, user_name, merged, reply_to_id)
+    finally:
+        # Only drop our own task reference — a newer message may have
+        # already replaced it with a fresh task in state.pending_tasks.
+        if state.pending_tasks.get(accu_key) is asyncio.current_task():
+            state.pending_tasks.pop(accu_key, None)
 
 
 def _build_accu_key(chat_id: int, user_id: int, thread_id: Optional[int]) -> str:

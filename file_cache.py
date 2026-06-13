@@ -26,6 +26,8 @@ from typing import Optional
 
 import aiohttp
 
+from tools_web import _is_safe_url
+
 logger = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120, connect=15)
@@ -128,6 +130,13 @@ async def download(url: str) -> Optional[CacheEntry]:
     if cached:
         logger.debug("[file_cache] Cache hit: %s", url)
         return cached
+
+    # SSRF check (#2) — bot server fetches this URL directly, unlike
+    # tg_send_photo/sticker/etc. where Telegram's servers do the fetch.
+    safe, reason = _is_safe_url(url)
+    if not safe:
+        logger.warning("[file_cache] Blocked unsafe URL %s: %s", url, reason)
+        return None
 
     try:
         async with aiohttp.ClientSession(timeout=_DOWNLOAD_TIMEOUT) as sess:
