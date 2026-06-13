@@ -352,7 +352,7 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.restrict_chat_member(
             chat_id=chat.id, user_id=uid, permissions=perms
         )
-        await _reply(update, f"🔊 Đã unmute <code>{uid}</code>.")
+        await _reply(update, t("unmute.done", _lang(update), uid=uid))
     except Exception as e:
         await _reply(update, t("unmute.fail", _lang(update), err=e))
 
@@ -495,7 +495,7 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     uid, rest = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update, "❌ Reply vào tin nhắn hoặc cung cấp @user.")
+        await _reply(update, t("need.target", _lang(update)))
         return
 
     reason = " ".join(rest) if rest else ""
@@ -599,9 +599,9 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k in removed:
         state.pending_feed_replies.pop(k, None)
     if removed:
-        await _reply(update, "✅ Đã hủy feed reply đang chờ.")
+        await _reply(update, t("cancel.done", _lang(update)))
     else:
-        await _reply(update, "ℹ️ Không có feed reply nào đang chờ.")
+        await _reply(update, t("cancel.none", _lang(update)))
 
 
 async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -867,7 +867,6 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply(update, t("lang.invalid", cur, list=", ".join(SUPPORTED)))
         return
 
-    # Switch language + clear history so AI starts fresh in new lang
+    # Switch language only — history is preserved
     state.set_cfg(cid, lang=code)
-    state.clear(cid)
     await _reply(update, t("lang.set", code, name=lang_name(code)))

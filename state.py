@@ -240,6 +240,12 @@ def get_cfg(cid: str) -> dict:
     return dict(_conv_cfg.get(cid, {}))
 
 
+def get_lang(cid: str) -> str:
+    # Returns the language code for this conv, falling back to DEFAULT_LANG.
+    from config import DEFAULT_LANG as _DL
+    return _conv_cfg.get(cid, {}).get("lang", _DL)
+
+
 def set_cfg(cid: str, **kwargs) -> None:
     _conv_cfg.setdefault(cid, {}).update(kwargs)
     _fire(db.config_set(f"conv_cfg:{cid}", _conv_cfg[cid]))

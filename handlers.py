@@ -403,12 +403,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return  # non-owner → dừng, không reply
 
     # ── Owner: kiểm tra pending feed reply (ForceReply) ───────
-    # Nếu owner đang reply vào prompt ForceReply từ nút ↩️ Reply trong /feed,
-    # ta forward ngay tin nhắn đó vào nhóm rồi return — không qua AI.
     if msg.reply_to_message:
-        feed_key = (chat.id, msg.reply_to_message.message_id)
         pending = state.feed_reply_pop(chat.id, msg.reply_to_message.message_id)
         if pending is not None:
+            # Compute lang for owner's conversation
+            _thread = getattr(msg, "message_thread_id", None)
+            _cid    = state.conv_id(chat.id, user.id, _thread, is_private,
+                                    state.topic_mode(chat.id))
+            _lang   = state.get_lang(_cid)
+
             reply_text = msg.text or msg.caption or ""
             if reply_text.strip():
                 try:
@@ -418,13 +421,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         reply_to_message_id = pending["target_msg_id"],
                     )
                     await msg.reply_text(
-                        f"✅ Đã gửi reply vào tin <code>#{pending['target_msg_id']}</code>.",
+                        t("feed.reply.sent", _lang, msg_id=pending["target_msg_id"]),
                         parse_mode = "HTML",
                     )
                 except Exception as e:
-                    await msg.reply_text(f"❌ Gửi thất bại: {e}", parse_mode="HTML")
+                    await msg.reply_text(
+                        t("feed.reply.fail", _lang, err=e),
+                        parse_mode="HTML",
+                    )
             else:
-                await msg.reply_text("❌ Tin nhắn trống, hủy reply.", parse_mode="HTML")
+                await msg.reply_text(
+                    t("feed.reply.empty", _lang),
+                    parse_mode="HTML",
+                )
             return  # Đã xử lý xong, không qua AI
 
     # ── Owner: chỉ reply khi ping/reply bot (trong nhóm) ──────
@@ -517,7 +526,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Feed actions ─────────────────────────────────────────
     if data.startswith("fd:"):
-        await _handle_feed_action(query, context, data)
+        thread_id = getattr(msg, "message_thread_id", None)
+        is_priv   = chat.type == ChatType.PRIVATE
+        cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
+                                  state.topic_mode(chat.id))
+        cb_lang   = state.get_lang(cid)
+        await _handle_feed_action(query, context, data, cb_lang)
         return
 
     # ── Follow-up questions ───────────────────────────────────
@@ -580,13 +594,14 @@ async def _handle_feed_action(
     query: "CallbackQuery",
     context: ContextTypes.DEFAULT_TYPE,
     data: str,
+    lang: str = "en",
 ) -> None:
     from datetime import datetime, timedelta, timezone
     from telegram import ChatPermissions
 
     parts = data.split(":")
     if len(parts) != 4:
-        await query.answer("❌ Dữ liệu không hợp lệ.")
+        await query.answer(t("toast.invalid_data", lang))
         return
 
     _, action, raw_cid, raw_id = parts
@@ -594,7 +609,7 @@ async def _handle_feed_action(
         chat_id = int(raw_cid)
         tgt_id  = int(raw_id)
     except ValueError:
-        await query.answer("❌ ID không hợp lệ.")
+        await query.answer(t("toast.invalid_id", lang))
         return
 
     bot = context.bot
@@ -603,7 +618,7 @@ async def _handle_feed_action(
     if action == "del":
         try:
             await bot.delete_message(chat_id=chat_id, message_id=tgt_id)
-            await query.answer("🗑️ Đã xóa.")
+            await query.answer(t("toast.deleted", lang))
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
             except Exception:
@@ -616,34 +631,27 @@ async def _handle_feed_action(
         try:
             await bot.pin_chat_message(chat_id=chat_id, message_id=tgt_id,
                                         disable_notification=True)
-            await query.answer("📌 Đã ghim.")
+            await query.answer(t("toast.pinned", lang))
         except Exception as e:
             await query.answer(f"❌ {e}", show_alert=True)
 
     # ── rep (manual reply) ────────────────────────────────────
     elif action == "rep":
-        # Send a ForceReply prompt to wherever /feed was called (owner's chat).
-        # When the owner types their reply, handle_message intercepts it and
-        # forwards it to the group as a reply to the original message.
         from telegram import ForceReply
         prompt_chat_id = query.message.chat_id
         try:
             prompt_msg = await bot.send_message(
                 chat_id      = prompt_chat_id,
-                text         = (
-                    f"✏️ Nhập tin nhắn bạn muốn <b>reply</b> vào tin "
-                    f"<code>#{tgt_id}</code> (nhóm <code>{chat_id}</code>):\n\n"
-                    f"<i>Gửi tin nhắn này để huỷ: /cancel</i>"
-                ),
+                text         = t("feed.reply.prompt_text", lang,
+                                 msg_id=tgt_id, chat_id=chat_id),
                 parse_mode   = "HTML",
                 reply_markup = ForceReply(
-                    selective             = True,
-                    input_field_placeholder = "Nhập nội dung reply...",
+                    selective               = True,
+                    input_field_placeholder = t("feed.reply.placeholder", lang),
                 ),
             )
-            # Store the pending context so handle_message can pick it up (5-min TTL)
             state.feed_reply_set(prompt_chat_id, prompt_msg.message_id, chat_id, tgt_id)
-            await query.answer("✏️ Hãy nhập tin nhắn reply.")
+            await query.answer(t("feed.reply.toast", lang))
         except Exception as e:
             await query.answer(f"❌ {e}", show_alert=True)
 
@@ -651,15 +659,15 @@ async def _handle_feed_action(
     elif action == "warn":
         count = state.warn_add(chat_id, tgt_id)
         max_w = state.get_max_warns()
-        msg_text = f"⚠️ User <code>{tgt_id}</code>: {count}/{max_w} cảnh cáo."
+        msg_text = t("feed.warn.msg", lang, uid=tgt_id, count=count, max=max_w)
         if count >= max_w:
             try:
                 await bot.ban_chat_member(chat_id=chat_id, user_id=tgt_id)
                 state.warn_reset(chat_id, tgt_id)
-                msg_text += f"\n🚫 Đạt max → đã BAN."
+                msg_text += t("feed.warn.banned", lang)
             except Exception as e:
-                msg_text += f"\n❌ Auto-ban thất bại: {e}"
-        await query.answer(f"⚠️ Warn {count}/{max_w}")
+                msg_text += t("feed.warn.ban_fail", lang, err=e)
+        await query.answer(f"⚠️ {count}/{max_w}")
         try:
             await bot.send_message(chat_id=chat_id, text=msg_text, parse_mode="HTML")
         except Exception:
@@ -675,7 +683,7 @@ async def _handle_feed_action(
             )
             await query.answer("🔇 Muted 1h.")
             await bot.send_message(chat_id=chat_id,
-                                    text=f"🔇 Đã mute <code>{tgt_id}</code> 1h.",
+                                    text=t("feed.mute.msg", lang, uid=tgt_id),
                                     parse_mode="HTML")
         except Exception as e:
             await query.answer(f"❌ {e}", show_alert=True)
@@ -686,7 +694,7 @@ async def _handle_feed_action(
             await bot.ban_chat_member(chat_id=chat_id, user_id=tgt_id)
             await query.answer("🚫 Banned.")
             await bot.send_message(chat_id=chat_id,
-                                    text=f"🚫 Đã ban <code>{tgt_id}</code>.",
+                                    text=t("feed.ban.msg", lang, uid=tgt_id),
                                     parse_mode="HTML")
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
@@ -696,4 +704,4 @@ async def _handle_feed_action(
             await query.answer(f"❌ {e}", show_alert=True)
 
     else:
-        await query.answer("❌ Action không xác định.")
+        await query.answer(t("toast.unknown_action", lang))

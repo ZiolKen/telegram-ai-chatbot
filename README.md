@@ -161,8 +161,8 @@ and config — `/model` or `/plugins` in topic A do not affect topic B.
 
 | Model | Notes |
 |---|---|
+| `gemini-3.1-flash-lite` | **Default** — fastest, lowest cost |
 | `gemini-3.5-flash` | Latest Gemini 3.5 |
-| `gemini-3.1-flash-lite` | **Default** — best speed/cost balance |
 | `gemini-3-flash-preview` | Gemini 3.0 preview |
 | `gemini-2.5-flash` | Gemini 2.5 stable |
 | `gemini-2.5-flash-lite-preview-06-17` | Lightweight 2.5 |
@@ -293,7 +293,7 @@ handlers.py       Message accumulation, context storage, response dispatch
 commands.py       Slash command handlers
 tools_web.py      web_search, fetch_url, arxiv_search
 tools_code.py     run_python (sandboxed subprocess + AST security scan)
-tools_telegram.py 30 Telegram action tools
+tools_telegram.py 31 Telegram action tools
 file_cache.py     In-RAM file cache (LRU eviction, no disk/DB writes)
 utils.py          md_to_html, split_message, merge
 ```

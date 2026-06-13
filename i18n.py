@@ -132,6 +132,36 @@ _T: dict[str, dict[str, str]] = {
         "unmute.done":"🔊 Unmuted <code>{uid}</code>.",
         "unmute.fail":"❌ Unmute failed: <code>{err}</code>",
 
+        # /cancel
+        "cancel.done": "✅ Pending feed reply cancelled.",
+        "cancel.none": "ℹ️ No pending feed reply to cancel.",
+
+        # Feed → Reply (ForceReply flow)
+        "feed.reply.sent":        "✅ Reply sent to message <code>#{msg_id}</code>.",
+        "feed.reply.fail":        "❌ Send failed: {err}",
+        "feed.reply.empty":       "❌ Empty message — reply cancelled.",
+        "feed.reply.prompt_text": (
+            "✏️ Type the message you want to <b>reply</b> to message "
+            "<code>#{msg_id}</code> (group <code>{chat_id}</code>):\n\n"
+            "<i>To cancel: /cancel</i>"
+        ),
+        "feed.reply.placeholder": "Type your reply…",
+        "feed.reply.toast":       "✏️ Type your reply message.",
+
+        # Feed action toasts (query.answer)
+        "toast.deleted":        "🗑️ Deleted.",
+        "toast.pinned":         "📌 Pinned.",
+        "toast.invalid_data":   "❌ Invalid data.",
+        "toast.invalid_id":     "❌ Invalid ID.",
+        "toast.unknown_action": "❌ Unknown action.",
+
+        # Feed warn/mute/ban group confirmation messages
+        "feed.warn.msg":      "⚠️ User <code>{uid}</code>: {count}/{max} warnings.",
+        "feed.warn.banned":   "\n🚫 Reached max → auto-banned.",
+        "feed.warn.ban_fail": "\n❌ Auto-ban failed: {err}",
+        "feed.mute.msg":      "🔇 Muted <code>{uid}</code> for 1h.",
+        "feed.ban.msg":       "🚫 Banned <code>{uid}</code>.",
+
         "addadmin.usage": (
             "❌ Syntax: <code>/addadmin @user [flags]</code>\n"
             "Flags: <code>del pin inv restrict topics promote info video post title:Name</code>\n"
@@ -271,6 +301,36 @@ _T: dict[str, dict[str, str]] = {
         "mute.fail":  "❌ Mute thất bại: <code>{err}</code>",
         "unmute.done":"🔊 Đã unmute <code>{uid}</code>.",
         "unmute.fail":"❌ Unmute thất bại: <code>{err}</code>",
+
+        # /cancel
+        "cancel.done": "✅ Đã hủy feed reply đang chờ.",
+        "cancel.none": "ℹ️ Không có feed reply nào đang chờ.",
+
+        # Feed → Reply (ForceReply flow)
+        "feed.reply.sent":        "✅ Đã gửi reply vào tin <code>#{msg_id}</code>.",
+        "feed.reply.fail":        "❌ Gửi thất bại: {err}",
+        "feed.reply.empty":       "❌ Tin nhắn trống — hủy reply.",
+        "feed.reply.prompt_text": (
+            "✏️ Nhập tin nhắn bạn muốn <b>reply</b> vào tin "
+            "<code>#{msg_id}</code> (nhóm <code>{chat_id}</code>):\n\n"
+            "<i>Để hủy: /cancel</i>"
+        ),
+        "feed.reply.placeholder": "Nhập nội dung reply…",
+        "feed.reply.toast":       "✏️ Hãy nhập tin nhắn reply.",
+
+        # Feed action toasts (query.answer)
+        "toast.deleted":        "🗑️ Đã xóa.",
+        "toast.pinned":         "📌 Đã ghim.",
+        "toast.invalid_data":   "❌ Dữ liệu không hợp lệ.",
+        "toast.invalid_id":     "❌ ID không hợp lệ.",
+        "toast.unknown_action": "❌ Action không xác định.",
+
+        # Feed warn/mute/ban group confirmation messages
+        "feed.warn.msg":      "⚠️ User <code>{uid}</code>: {count}/{max} cảnh cáo.",
+        "feed.warn.banned":   "\n🚫 Đạt max → đã BAN.",
+        "feed.warn.ban_fail": "\n❌ Auto-ban thất bại: {err}",
+        "feed.mute.msg":      "🔇 Đã mute <code>{uid}</code> 1h.",
+        "feed.ban.msg":       "🚫 Đã ban <code>{uid}</code>.",
 
         "addadmin.usage": (
             "❌ Cú pháp: <code>/addadmin @user [flags]</code>\n"
