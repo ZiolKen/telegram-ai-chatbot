@@ -37,6 +37,11 @@ _conv_cfg:      dict[str,  dict]        = {}
 pending_texts: dict[str, list[str]]    = defaultdict(list)
 pending_tasks: dict[str, asyncio.Task] = {}
 
+# Pending manual feed replies triggered by the ↩️ Reply button.
+# key   : (private_chat_id, prompt_msg_id)  — the ForceReply prompt bot sent
+# value : {"group_chat_id": int, "target_msg_id": int}
+pending_feed_replies: dict[tuple[int, int], dict] = {}
+
 # ── Feed buffer  (per group) ─────────────────────────────────────────────────
 MAX_FEED_BUFFER = 100
 

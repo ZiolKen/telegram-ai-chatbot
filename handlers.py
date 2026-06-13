@@ -402,6 +402,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ))
         return  # non-owner → dừng, không reply
 
+    # ── Owner: kiểm tra pending feed reply (ForceReply) ───────
+    # Nếu owner đang reply vào prompt ForceReply từ nút ↩️ Reply trong /feed,
+    # ta forward ngay tin nhắn đó vào nhóm rồi return — không qua AI.
+    if msg.reply_to_message:
+        feed_key = (chat.id, msg.reply_to_message.message_id)
+        if feed_key in state.pending_feed_replies:
+            pending   = state.pending_feed_replies.pop(feed_key)
+            reply_text = msg.text or msg.caption or ""
+            if reply_text.strip():
+                try:
+                    await context.bot.send_message(
+                        chat_id             = pending["group_chat_id"],
+                        text                = reply_text,
+                        reply_to_message_id = pending["target_msg_id"],
+                    )
+                    await msg.reply_text(
+                        f"✅ Đã gửi reply vào tin <code>#{pending['target_msg_id']}</code>.",
+                        parse_mode = "HTML",
+                    )
+                except Exception as e:
+                    await msg.reply_text(f"❌ Gửi thất bại: {e}", parse_mode="HTML")
+            else:
+                await msg.reply_text("❌ Tin nhắn trống, hủy reply.", parse_mode="HTML")
+            return  # Đã xử lý xong, không qua AI
+
     # ── Owner: chỉ reply khi ping/reply bot (trong nhóm) ──────
     should_respond = is_private or is_reply_to_bot or is_mentioned
 
@@ -600,17 +625,33 @@ async def _handle_feed_action(
         except Exception as e:
             await query.answer(f"❌ {e}", show_alert=True)
 
-    # ── rep (reply context) ───────────────────────────────────
+    # ── rep (manual reply) ────────────────────────────────────
     elif action == "rep":
-        # Post a prompt message so the owner knows to reply
+        # Send a ForceReply prompt to wherever /feed was called (owner's chat).
+        # When the owner types their reply, handle_message intercepts it and
+        # forwards it to the group as a reply to the original message.
+        from telegram import ForceReply
+        prompt_chat_id = query.message.chat_id
         try:
-            await bot.send_message(
-                chat_id    = chat_id,
-                text       = f"↩️ Reply tới tin nhắn <code>#{tgt_id}</code> — nhắn AI để compose trả lời.",
-                parse_mode = "HTML",
-                reply_to_message_id = tgt_id,
+            prompt_msg = await bot.send_message(
+                chat_id      = prompt_chat_id,
+                text         = (
+                    f"✏️ Nhập tin nhắn bạn muốn <b>reply</b> vào tin "
+                    f"<code>#{tgt_id}</code> (nhóm <code>{chat_id}</code>):\n\n"
+                    f"<i>Gửi tin nhắn này để huỷ: /cancel</i>"
+                ),
+                parse_mode   = "HTML",
+                reply_markup = ForceReply(
+                    selective             = True,
+                    input_field_placeholder = "Nhập nội dung reply...",
+                ),
             )
-            await query.answer("↩️ Đã set reply context.")
+            # Store the pending context so handle_message can pick it up
+            state.pending_feed_replies[(prompt_chat_id, prompt_msg.message_id)] = {
+                "group_chat_id": chat_id,
+                "target_msg_id": tgt_id,
+            }
+            await query.answer("✏️ Hãy nhập tin nhắn reply.")
         except Exception as e:
             await query.answer(f"❌ {e}", show_alert=True)
 
