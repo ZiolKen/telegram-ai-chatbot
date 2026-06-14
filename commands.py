@@ -806,11 +806,25 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     follow_icon = "✅" if ENABLE_FOLLOWUP else "❌"
     topic_icon  = "✅" if tm else "❌"
     msgs_str    = t("status.msgs", lang, n=len(hist))
+
+    # ── API keys & Webhook (real-time from Telegram) ───────────
+    key_count = len(GEMINI_KEYS)
+    key_line  = f"🔑 API Key  : <b>{key_count}</b> key{'s' if key_count != 1 else ''}"
+    try:
+        wh_info     = await context.bot.get_webhook_info()
+        webhook_active = bool(wh_info.url)
+        wh_icon     = "✅" if webhook_active else "❌"
+    except Exception:
+        wh_icon = "❓"
+    wh_line = f"🔗 Webhook  : {wh_icon}"
+
     await _reply(update,
         f"{t('status.title', lang)}\n\n"
         f"{t('status.conv', lang)}   : <code>{cid}</code>\n"
         f"{t('status.history', lang)}: {msgs_str}\n"
         f"{t('status.model', lang)}  : <b>{label}</b>\n"
+        f"{key_line}\n"
+        f"{wh_line}\n"
         f"{t('status.plugins', lang)}: {plug_icon}\n"
         f"{t('status.followup', lang)}: {follow_icon}\n"
         f"{t('status.topic', lang)}: {topic_icon}\n"
