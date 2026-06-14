@@ -14,12 +14,6 @@ Startup sequence (webhook mode)
     3. Web server lên → Render health check pass
     4. PTB Application init (.updater(None) để tránh hang)
     5. Webhook đăng ký → bot nhận messages
-
-Tại sao KHÔNG dùng background task nữa:
-  Background task (cách cũ) → health check luôn thấy "initialising…" vì
-  DB init chạy song song, chưa xong thì health check đã hỏi.
-  Cách mới: db.py đã confirm DB OK → main.py connect ngay (< 2s) →
-  khi web server lên thì DB đã sẵn sàng → health check thấy "connected ✓".
 """
 
 import asyncio
@@ -28,6 +22,7 @@ import logging
 from aiohttp import web
 from telegram import Update
 from telegram.ext import (
+    AIORateLimiter,
     Application,
     CallbackQueryHandler,
     CommandHandler,
@@ -47,7 +42,6 @@ from commands import (
     cmd_lang,
     cmd_reset, cmd_start, cmd_status,
     cmd_sysreset, cmd_topic,
-    # New moderation commands
     cmd_del, cmd_pin,
     cmd_ban, cmd_unban,
     cmd_mute, cmd_unmute,
@@ -69,11 +63,9 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_application() -> Application:
-    builder = Application.builder().token(BOT_TOKEN)
+    builder = Application.builder().token(BOT_TOKEN).rate_limiter(AIORateLimiter(max_retries=5))
 
     if WEBHOOK_URL:
-        # Bắt buộc khi dùng webhook thủ công: tắt Updater để tránh hang
-        # trong updater.initialize() — đây là nguyên nhân gốc của "initialising…"
         builder = builder.updater(None)
 
     return builder.build()
@@ -138,7 +130,6 @@ async def run_webhook(app: Application) -> None:
         elif err:
             db_status = f"offline — {err}"
         else:
-            # Chỉ xảy ra nếu DATABASE_URL không được set (in-memory mode)
             db_status = "disabled (no DATABASE_URL)"
 
         return web.Response(text="\n".join([
