@@ -10,7 +10,8 @@ WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────
 DATABASE_URL: str  = os.getenv("DATABASE_URL", "")
-MAX_CONV_ROWS: int = int(os.getenv("MAX_CONV_ROWS", "10000"))
+# Đã nâng giới hạn lên 10 triệu tin nhắn
+MAX_CONV_ROWS: int = int(os.getenv("MAX_CONV_ROWS", "10000000"))
 
 # ── Gemini ────────────────────────────────────────────────────────────────
 GEMINI_KEYS: list[str] = [
@@ -44,20 +45,14 @@ MAX_HISTORY: int           = int(os.getenv("MAX_HISTORY", "40"))
 MESSAGE_MERGE_DELAY: float = float(os.getenv("MESSAGE_MERGE_DELAY", "1.5"))
 
 # ── Group Context Mode ────────────────────────────────────────────────────
-# Khi bật: bot đọc VÀ lưu TẤT CẢ tin nhắn trong group vào conv chung
-# (không chỉ tin nhắn của owner), giúp AI có context đầy đủ hơn.
-# conv_id của group = g:{chat_id} (shared toàn group) thay vì g:{chat_id}:u:{uid}
 GROUP_CONTEXT_ENABLED: bool = os.getenv("GROUP_CONTEXT_ENABLED", "true").lower() == "true"
 
 # ── File Cache (RAM only, NO disk/DB) ─────────────────────────────────────
-# Tổng dung lượng tối đa cho file cache trong RAM. Files được evict LRU
-# khi vượt giới hạn. Cache xóa hoàn toàn khi Render restart.
-FILE_CACHE_MAX_MB: int = int(os.getenv("FILE_CACHE_MAX_MB", "256"))
+# Tăng cache lên 2GB để hỗ trợ xử lý file tốt hơn
+FILE_CACHE_MAX_MB: int = int(os.getenv("FILE_CACHE_MAX_MB", "2048"))
 
 # ── Language ─────────────────────────────────────────────────────────────
-# Default UI + AI prompt language for new conversations.
-# Per-conversation lang overrides this (stored in DB via conv_cfg).
-DEFAULT_LANG: str = os.getenv("DEFAULT_LANG", "en")   # "en" | "vi"
+DEFAULT_LANG: str = os.getenv("DEFAULT_LANG", "vi")
 
 # ── Data dir ─────────────────────────────────────────────────────────────
 DATA_DIR: str = "data"
