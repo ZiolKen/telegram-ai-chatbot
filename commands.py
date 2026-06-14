@@ -387,11 +387,24 @@ _PERM_FLAGS = {
 }
 
 _DEFAULT_ADMIN_PERMS = {
-    "can_manage_chat":       True,
-    "can_delete_messages":   True,
-    "can_pin_messages":      True,
-    "can_invite_users":      True,
-    "can_manage_video_chats":True,
+    "can_manage_chat":        True,
+    "can_delete_messages":    True,
+    "can_pin_messages":       True,
+    "can_invite_users":       True,
+    "can_manage_video_chats": True,
+}
+
+# All non-channel permissions (used by the "full" flag)
+_FULL_ADMIN_PERMS = {
+    "can_manage_chat":        True,
+    "can_delete_messages":    True,
+    "can_manage_video_chats": True,
+    "can_restrict_members":   True,
+    "can_promote_members":    True,
+    "can_change_info":        True,
+    "can_invite_users":       True,
+    "can_pin_messages":       True,
+    "can_manage_topics":      True,
 }
 
 
@@ -408,27 +421,34 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Parse flags
-    perms     = dict(_DEFAULT_ADMIN_PERMS)
-    title     = ""
-    has_flags = False
+    title      = ""
+    has_flags  = False
+    use_full   = False
+    explicit: set[str] = set()   # perm fields explicitly requested
 
     for token in rest:
         tok = token.lower()
         if tok.startswith("title:"):
-            title     = token[6:][:16]
-        elif tok in _PERM_FLAGS:
-            perms[_PERM_FLAGS[tok]] = True
+            title = token[6:][:16]
+        elif tok == "full":
             has_flags = True
-        else:
-            # Ignore unknown tokens (e.g. leftover reason text)
-            pass
+            use_full  = True
+        elif tok in _PERM_FLAGS:
+            has_flags = True
+            explicit.add(_PERM_FLAGS[tok])
+        # Unknown tokens ignored (leftover text etc.)
 
-    if not has_flags and not rest:
-        pass  # Use defaults as-is
+    if use_full:
+        # Grant every non-channel admin permission
+        perms = dict(_FULL_ADMIN_PERMS)
     elif has_flags:
-        # Reset all optional perms to False, only set specified ones
-        for v in _PERM_FLAGS.values():
-            perms.setdefault(v, False)
+        # Start with the bare minimum, then only add what was explicitly requested
+        perms = {"can_manage_chat": True}
+        for field in set(_PERM_FLAGS.values()):
+            perms[field] = field in explicit
+    else:
+        # No flags → use safe defaults
+        perms = dict(_DEFAULT_ADMIN_PERMS)
 
     try:
         await context.bot.promote_chat_member(
@@ -634,34 +654,10 @@ async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 target_chat_id = available[0]
             elif len(available) > 1:
                 ids_fmt = "\n".join(f"• <code>{cid}</code>" for cid in available)
-                usage = {
-                    "en": (
-                        "📋 Multiple groups in buffer. Specify one:\n"
-                        f"<code>/feed &lt;group_id&gt; [n]</code>\n\n"
-                        f"Available:\n{ids_fmt}"
-                    ),
-                    "vi": (
-                        "📋 Có nhiều nhóm trong buffer. Chỉ định nhóm cụ thể:\n"
-                        f"<code>/feed &lt;group_id&gt; [n]</code>\n\n"
-                        f"Có sẵn:\n{ids_fmt}"
-                    ),
-                }
-                await _reply(update, usage.get(lang, usage["en"]))
+                await _reply(update, t("feed.multi_group", lang, ids=ids_fmt))
                 return
             else:
-                no_data = {
-                    "en": (
-                        "📋 No feed data yet.\n"
-                        "Add the bot to a group with <code>GROUP_CONTEXT_ENABLED=true</code>, "
-                        "then use <code>/feed &lt;group_id&gt; [n]</code>."
-                    ),
-                    "vi": (
-                        "📋 Chưa có dữ liệu feed.\n"
-                        "Thêm bot vào nhóm với <code>GROUP_CONTEXT_ENABLED=true</code>, "
-                        "sau đó dùng <code>/feed &lt;group_id&gt; [n]</code>."
-                    ),
-                }
-                await _reply(update, no_data.get(lang, no_data["en"]))
+                await _reply(update, t("feed.no_data", lang))
                 return
 
     n       = int(args[0]) if (args and args[0].isdigit()) else 5
@@ -669,24 +665,10 @@ async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buf_sz  = state.feed_size(target_chat_id)
 
     if not entries:
-        empty = {
-            "en": (
-                f"📋 Feed buffer for <code>{target_chat_id}</code> is empty.\n"
-                "Make sure <code>GROUP_CONTEXT_ENABLED=true</code> is set."
-            ),
-            "vi": (
-                f"📋 Buffer của <code>{target_chat_id}</code> trống.\n"
-                "Đảm bảo <code>GROUP_CONTEXT_ENABLED=true</code> trong config."
-            ),
-        }
-        await _reply(update, empty.get(lang, empty["en"]))
+        await _reply(update, t("feed.empty.group", lang, chat_id=target_chat_id))
         return
 
-    header = {
-        "en": f"📋 <b>{len(entries)} recent messages</b> from <code>{target_chat_id}</code> (buffer: {buf_sz}):",
-        "vi": f"📋 <b>{len(entries)} tin gần nhất</b> từ <code>{target_chat_id}</code> (buffer: {buf_sz}):",
-    }
-    await _reply(update, header.get(lang, header["en"]))
+    await _reply(update, t("feed.header.group", lang, n=len(entries), chat_id=target_chat_id, buf=buf_sz))
 
     for e in entries:
         date_str     = e.date.strftime("%Y-%m-%d %H:%M")

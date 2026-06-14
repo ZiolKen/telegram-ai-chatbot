@@ -1,11 +1,22 @@
 """
-Web-based tools: DuckDuckGo/Google search, URL extraction, ArXiv lookup.
-Each public function is async and returns a plain string for the LLM.
-Includes SSRF protection on fetch_url (#2).
+tools_web.py — Web search, URL fetch, ArXiv.
+
+Engine priority for web_search():
+  1. Google CSE  (if GOOGLE_API_KEY + GOOGLE_CSE_ID set)
+  2. DuckDuckGo  (fallback, with retry + jitter)
+
+The `engine` parameter has been removed from the tool declaration:
+  • AI was sometimes passing engine="duckduckgo" from the enum, bypassing
+    Google CSE even when configured.
+  • Engine selection is now fully automatic and internal.
 """
+from __future__ import annotations
+
 import asyncio
 import ipaddress
 import logging
+import random
+import time
 from urllib.parse import urlparse
 
 import aiohttp
@@ -15,6 +26,15 @@ from config import GOOGLE_API_KEY, GOOGLE_CSE_ID
 
 logger = logging.getLogger(__name__)
 
+# Evaluated once at startup — logged so misconfiguration is visible.
+_GOOGLE_READY = bool(GOOGLE_API_KEY and GOOGLE_CSE_ID)
+if _GOOGLE_READY:
+    logger.info("[web] Google CSE ready (key=%.8s… cx=%.8s…)",
+                GOOGLE_API_KEY, GOOGLE_CSE_ID)
+else:
+    logger.info("[web] Google CSE not configured — will use DuckDuckGo")
+
+
 # ── Tool declarations ─────────────────────────────────────────────────────
 WEB_TOOL_DECLS = [
     {
@@ -22,23 +42,19 @@ WEB_TOOL_DECLS = [
         "description": (
             "Search the internet for current information, news, facts, "
             "prices, or any topic that may have changed recently. "
-            "Engine is selected automatically; you only need to pass 'query'."
+            "Uses the best available search engine automatically."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "query":  {"type": "STRING", "description": "Search query"},
-                "engine": {
+                "query": {
                     "type": "STRING",
-                    "description": (
-                        "Search engine override. "
-                        "Leave unset to use the best available engine automatically. "
-                        "Options: 'auto' (default), 'google', 'duckduckgo'."
-                    ),
-                    "enum": ["auto", "duckduckgo", "google"],
+                    "description": "Search query",
                 },
             },
             "required": ["query"],
+            # engine parameter intentionally removed — AI was overriding
+            # auto-selection and bypassing Google CSE.
         },
     },
     {
@@ -51,7 +67,10 @@ WEB_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "url": {"type": "STRING", "description": "Full https:// URL to fetch"},
+                "url": {
+                    "type": "STRING",
+                    "description": "Full https:// URL to fetch",
+                },
             },
             "required": ["url"],
         },
@@ -65,8 +84,14 @@ WEB_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "query":       {"type": "STRING", "description": "Research topic or paper title"},
-                "max_results": {"type": "NUMBER", "description": "Number of papers to return (1-5)"},
+                "query": {
+                    "type": "STRING",
+                    "description": "Research topic or paper title",
+                },
+                "max_results": {
+                    "type": "NUMBER",
+                    "description": "Number of papers to return (1–5)",
+                },
             },
             "required": ["query"],
         },
@@ -74,182 +99,256 @@ WEB_TOOL_DECLS = [
 ]
 
 
-# ── SSRF Protection (#2) ──────────────────────────────────────────────────
+# ── SSRF protection ───────────────────────────────────────────────────────
 _BLOCKED_RANGES = [
-    ipaddress.ip_network("127.0.0.0/8"),     # loopback
-    ipaddress.ip_network("10.0.0.0/8"),       # private
-    ipaddress.ip_network("172.16.0.0/12"),    # private
-    ipaddress.ip_network("192.168.0.0/16"),   # private
-    ipaddress.ip_network("169.254.0.0/16"),   # link-local / cloud metadata
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),   # link-local / AWS metadata
     ipaddress.ip_network("0.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),          # IPv6 loopback
-    ipaddress.ip_network("fc00::/7"),         # IPv6 private
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
 ]
 _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
 
 
 def _is_safe_url(url: str) -> tuple[bool, str]:
-    """Returns (is_safe, reason)."""
     try:
         p = urlparse(url)
     except Exception:
         return False, "URL không hợp lệ"
-
     if p.scheme not in ("http", "https"):
-        return False, f"Scheme <code>{p.scheme}</code> không được phép, chỉ http/https"
-
+        return False, f"Scheme '{p.scheme}' không được phép"
     host = (p.hostname or "").lower().rstrip(".")
     if not host:
         return False, "Không có hostname"
-
     if host in _BLOCKED_HOSTNAMES:
-        return False, f"Hostname <code>{host}</code> bị chặn"
-
+        return False, f"Hostname '{host}' bị chặn"
     try:
         ip = ipaddress.ip_address(host)
         for net in _BLOCKED_RANGES:
             if ip in net:
-                return False, f"IP <code>{host}</code> thuộc dải nội bộ bị chặn"
+                return False, f"IP '{host}' thuộc dải nội bộ bị chặn"
     except ValueError:
-        pass  # Normal hostname — OK
-
+        pass
     return True, ""
 
 
-# ── Web Search ────────────────────────────────────────────────────────────
-_GOOGLE_READY = bool(GOOGLE_API_KEY and GOOGLE_CSE_ID)
-
-
+# ── Web search — public entry point ──────────────────────────────────────
 async def web_search(query: str, engine: str = "auto") -> str:
-    """Engine selection:
-    - 'auto' (default): Google CSE nếu có key, ngược lại DDG.
-    - 'google': Google CSE; fallback DDG nếu lỗi.
-    - 'duckduckgo': DDG trực tiếp.
     """
-    use_google = engine == "google" or (engine == "auto" and _GOOGLE_READY)
-    if use_google and _GOOGLE_READY:
-        result = await _google(query)
-        if result.startswith(("Lỗi Google", "Google Search lỗi")):
-            logger.warning("Google CSE lỗi, fallback DDG: %s", result)
-            return await _ddg(query)
-        return result
+    Engine selection (fully automatic — `engine` arg kept for internal use
+    but is no longer exposed in the tool declaration):
+      1. Google CSE if configured.
+      2. DuckDuckGo with retry+jitter as fallback.
+    """
+    if _GOOGLE_READY and engine != "duckduckgo":
+        try:
+            result = await _google(query)
+            if result is not None:
+                logger.debug("[web] Google CSE OK for: %s", query[:60])
+                return result
+            logger.warning("[web] Google CSE returned no result, falling back to DDG")
+        except Exception as e:
+            logger.warning("[web] Google CSE error (%s), falling back to DDG", e)
+
     return await _ddg(query)
+
+
+# ── Google CSE ────────────────────────────────────────────────────────────
+async def _google(query: str) -> str | None:
+    """
+    Returns formatted result string, or None on any failure
+    (caller will fall back to DDG).
+    """
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx":  GOOGLE_CSE_ID,
+        "q":   query,
+        "num": 8,
+    }
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=15)
+        ) as s:
+            async with s.get(url, params=params) as r:
+                if r.status == 429:
+                    logger.warning("[web] Google CSE rate-limited (429)")
+                    return None
+                if r.status == 403:
+                    logger.error("[web] Google CSE 403 — check API key / CSE ID")
+                    return None
+                if r.status != 200:
+                    logger.error("[web] Google CSE HTTP %d", r.status)
+                    return None
+                data = await r.json()
+
+        items = data.get("items", [])
+        if not items:
+            # Return empty-string sentinel so caller knows Google worked
+            # but found nothing (no need to fall back to DDG).
+            return "Không tìm thấy kết quả nào."
+
+        lines = [
+            f"**{i.get('title', '')}**\n{i.get('link', '')}\n{i.get('snippet', '')}"
+            for i in items
+        ]
+        return "\n\n".join(lines)
+
+    except asyncio.TimeoutError:
+        logger.warning("[web] Google CSE timeout")
+        return None
+    except Exception as e:
+        logger.error("[web] Google CSE unexpected error: %s", e)
+        return None
+
+
+# ── DuckDuckGo ────────────────────────────────────────────────────────────
+# DDG rate-limits by IP. Mitigation strategy:
+#   • Use a persistent DDGS session across retries (not a new one each time).
+#   • Exponential backoff with random jitter so concurrent callers don't
+#     all retry simultaneously.
+#   • Vary the backend (wt-wt / us-en) across attempts.
+#   • Handle both old RatelimitException and new DuckDuckGoSearchException.
+
+_DDG_BACKENDS = [
+    {"region": "wt-wt", "safesearch": "off"},
+    {"region": "us-en", "safesearch": "moderate"},
+    {"region": "wt-wt", "safesearch": "moderate"},
+]
+# Seconds to wait before each attempt: [immediate, ~5s, ~15s]
+_DDG_DELAYS = [0, 5, 15]
 
 
 async def _ddg(query: str) -> str:
     try:
         from duckduckgo_search import DDGS
-        from duckduckgo_search.exceptions import RatelimitException
     except ImportError:
-        return "⚠️ duckduckgo-search chưa cài. Chạy: pip install duckduckgo-search"
+        return "⚠️ duckduckgo-search not installed. Run: pip install duckduckgo-search"
 
-    loop = asyncio.get_event_loop()
-    last_err = None
-    for attempt, delay in enumerate([0, 3, 8]):  # 3 lần: ngay / +3s / +8s
-        if delay:
-            await asyncio.sleep(delay)
+    # Collect whichever exception classes exist in this version
+    exc_classes: tuple = (Exception,)
+    try:
+        from duckduckgo_search.exceptions import RatelimitException
+        exc_classes = (RatelimitException,)
+    except ImportError:
+        pass
+    try:
+        from duckduckgo_search.exceptions import DuckDuckGoSearchException
+        exc_classes = (*exc_classes, DuckDuckGoSearchException)
+    except ImportError:
+        pass
+
+    loop = asyncio.get_running_loop()
+    last_err: Exception | None = None
+
+    for attempt, base_delay in enumerate(_DDG_DELAYS):
+        if base_delay > 0:
+            # Jitter ±30% so concurrent calls don't all hit DDG at once
+            jitter = base_delay * random.uniform(0.7, 1.3)
+            logger.info("[web] DDG retry %d/3 — waiting %.1fs", attempt + 1, jitter)
+            await asyncio.sleep(jitter)
+
+        backend = _DDG_BACKENDS[attempt % len(_DDG_BACKENDS)]
         try:
             hits = await loop.run_in_executor(
                 None,
-                lambda: list(DDGS().text(query, max_results=6)),
+                lambda b=backend: list(
+                    DDGS().text(
+                        query,
+                        max_results=8,
+                        region=b["region"],
+                        safesearch=b["safesearch"],
+                    )
+                ),
             )
             if not hits:
                 return "Không tìm thấy kết quả."
-            lines = []
-            for h in hits:
-                title = h.get("title", "")
-                href  = h.get("href", "")
-                body  = h.get("body", "")[:350]
-                lines.append(f"**{title}**\n{href}\n{body}")
+
+            lines = [
+                f"**{h.get('title', '')}**\n{h.get('href', '')}\n{h.get('body', '')[:350]}"
+                for h in hits
+            ]
+            if attempt > 0:
+                logger.info("[web] DDG succeeded on attempt %d", attempt + 1)
             return "\n\n".join(lines)
-        except RatelimitException as e:
+
+        except exc_classes as e:
             last_err = e
-            logger.warning("DDG rate limit (lần %d/3), thử lại sau %ds", attempt + 1, delay)
+            logger.warning("[web] DDG rate-limited (attempt %d/3): %s", attempt + 1, e)
             continue
         except Exception as e:
-            logger.error("DDG search: %s", e)
+            logger.error("[web] DDG unexpected error: %s", e)
             return f"Lỗi tìm kiếm: {e}"
-    return "⚠️ DuckDuckGo rate limit sau 3 lần thử. Thử lại sau ít phút."
+
+    logger.error("[web] DDG failed after 3 attempts. Last error: %s", last_err)
+    return (
+        "⚠️ DuckDuckGo đang rate-limit sau 3 lần thử.\n"
+        "Thử lại sau vài phút, hoặc cấu hình GOOGLE_API_KEY + GOOGLE_CSE_ID "
+        "để dùng Google Search thay thế."
+    )
 
 
-async def _google(query: str) -> str:
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_CSE_ID, "q": query, "num": 6}
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-            async with s.get(url, params=params) as r:
-                if r.status != 200:
-                    return f"Google Search lỗi HTTP {r.status}"
-                data = await r.json()
-        items = data.get("items", [])
-        if not items:
-            return "Không tìm thấy kết quả Google."
-        lines = [
-            f"**{i.get('title','')}**\n{i.get('link','')}\n{i.get('snippet','')}"
-            for i in items
-        ]
-        return "\n\n".join(lines)
-    except Exception as e:
-        logger.error("Google search: %s", e)
-        return f"Lỗi Google Search: {e}"
-
-
-# ── URL Fetch (with SSRF protection) ─────────────────────────────────────
-_HEADERS = {
+# ── URL fetch ─────────────────────────────────────────────────────────────
+_FETCH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) "
         "Gecko/20100101 Firefox/124.0"
-    )
+    ),
+    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
 }
 
 
 async def fetch_url(url: str) -> str:
-    # SSRF check (#2)
     safe, reason = _is_safe_url(url)
     if not safe:
         return f"❌ URL bị chặn: {reason}"
 
     try:
         async with aiohttp.ClientSession(
-            headers=_HEADERS,
+            headers=_FETCH_HEADERS,
             timeout=aiohttp.ClientTimeout(total=20),
         ) as s:
-            async with s.get(url) as r:
+            async with s.get(url, allow_redirects=True) as r:
                 if r.status != 200:
                     return f"Không thể tải URL (HTTP {r.status})"
-
-                # Block binary content types
                 ct = r.headers.get("Content-Type", "")
-                if not any(t in ct for t in ("text/", "application/json", "application/xml")):
-                    return f"❌ Content-Type <code>{ct}</code> không phải text, bỏ qua."
-
+                if not any(x in ct for x in ("text/", "application/json", "application/xml")):
+                    return f"❌ Content-Type '{ct}' không phải text, bỏ qua."
                 html_content = await r.text(errors="replace")
 
         soup = BeautifulSoup(html_content, "lxml")
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside", "noscript"]):
+        for tag in soup(["script", "style", "nav", "footer",
+                          "header", "aside", "noscript"]):
             tag.decompose()
 
         body = soup.find("article") or soup.find("main") or soup.body or soup
         text = "\n".join(
-            line.strip() for line in body.get_text(separator="\n").splitlines()
+            line.strip()
+            for line in body.get_text(separator="\n").splitlines()
             if line.strip()
         )
         if len(text) > 9000:
             text = text[:9000] + "\n…[nội dung bị cắt bớt]"
         return f"Nội dung từ {url}:\n\n{text}"
+
+    except asyncio.TimeoutError:
+        return f"❌ Timeout khi tải: {url}"
     except Exception as e:
-        logger.error("fetch_url %s: %s", url, e)
+        logger.error("[web] fetch_url %s: %s", url, e)
         return f"Lỗi tải URL: {e}"
 
 
-# ── ArXiv Search ─────────────────────────────────────────────────────────
+# ── ArXiv ─────────────────────────────────────────────────────────────────
 async def arxiv_search(query: str, max_results: int = 3) -> str:
     max_results = max(1, min(5, int(max_results)))
     try:
         import arxiv
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
-        def _run():
+        def _run() -> list:
             client = arxiv.Client()
             search = arxiv.Search(
                 query=query,
@@ -274,8 +373,9 @@ async def arxiv_search(query: str, max_results: int = 3) -> str:
                 f"📄 {p.summary[:600]}…"
             )
         return "\n\n---\n\n".join(blocks)
+
     except ImportError:
         return "⚠️ Gói arxiv chưa cài. Chạy: pip install arxiv"
     except Exception as e:
-        logger.error("arxiv_search: %s", e)
+        logger.error("[web] arxiv_search: %s", e)
         return f"Lỗi tìm kiếm ArXiv: {e}"

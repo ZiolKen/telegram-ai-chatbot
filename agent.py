@@ -109,7 +109,7 @@ async def _dispatch(
 
     try:
         if name == "web_search":
-            result = await web_search(args.get("query", ""), args.get("engine", "duckduckgo"))
+            result = await web_search(args.get("query", ""), args.get("engine", "auto"))
         elif name == "fetch_url":
             result = await fetch_url(args.get("url", ""))
         elif name == "arxiv_search":

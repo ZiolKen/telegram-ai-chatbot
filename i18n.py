@@ -47,7 +47,7 @@ _T: dict[str, dict[str, str]] = {
         "help.mute":           "<code>/mute [@u] &lt;time&gt;</code>   — Mute (5m 2h 1d 1w 3mo 1y)",
         "help.unmute":         "<code>/unmute @u</code>          — Unmute user",
         "help.addadmin":       "<code>/addadmin [@u] [flags]</code> — Promote admin",
-        "help.addadmin.flags": "   Flags: <code>del pin inv restrict topics title:Name</code>",
+        "help.addadmin.flags": "   Flags: <code>del pin inv restrict topics title:Name full</code>  (<b>full</b>=all)",
         "help.rmadmin":        "<code>/rmadmin @u</code>         — Demote admin",
         "help.warn":           "<code>/warn [@u] [reason]</code>  — Warn user (auto-ban at max)",
         "help.warns":          "<code>/warns [@u]</code>          — View warn count",
@@ -165,7 +165,8 @@ _T: dict[str, dict[str, str]] = {
         "addadmin.usage": (
             "❌ Syntax: <code>/addadmin @user [flags]</code>\n"
             "Flags: <code>del pin inv restrict topics promote info video post title:Name</code>\n"
-            "No flags → default permissions (del, pin, inv, video)"
+            "<b>full</b> → all admin permissions at once\n"
+            "No flags → default (del, pin, inv, video)"
         ),
         "addadmin.done":   "👑 Promoted <code>{uid}</code> as admin",
         "addadmin.title":  " (<b>{title}</b>)",
@@ -189,6 +190,10 @@ _T: dict[str, dict[str, str]] = {
             "Make sure <code>GROUP_CONTEXT_ENABLED=true</code> in config."
         ),
         "feed.header":       "📋 <b>{n} recent messages</b> (buffer: {buf}):",
+        "feed.header.group": "📋 <b>{n} recent messages</b> from <code>{chat_id}</code> (buffer: {buf}):",
+        "feed.empty.group":  "📋 Buffer for <code>{chat_id}</code> is empty.\nMake sure <code>GROUP_CONTEXT_ENABLED=true</code> is set.",
+        "feed.no_data":      "📋 No feed data yet.\nAdd the bot to a group with <code>GROUP_CONTEXT_ENABLED=true</code>, then use <code>/feed &lt;group_id&gt; [n]</code>.",
+        "feed.multi_group":  "📋 Multiple groups in buffer. Specify one:\n<code>/feed &lt;group_id&gt; [n]</code>\n\nAvailable:\n{ids}",
 
         # handlers.py
         "processing":   "⏳",
@@ -217,7 +222,7 @@ _T: dict[str, dict[str, str]] = {
         "help.mute":           "<code>/mute [@u] &lt;tg&gt;</code>  — Mute (5m 2h 1d 1w 3mo 1y)",
         "help.unmute":         "<code>/unmute @u</code>          — Unmute user",
         "help.addadmin":       "<code>/addadmin [@u] [flags]</code> — Promote admin",
-        "help.addadmin.flags": "   Flags: <code>del pin inv restrict topics title:Tên</code>",
+        "help.addadmin.flags": "   Flags: <code>del pin inv restrict topics title:Tên full</code>  (<b>full</b>=tất cả)",
         "help.rmadmin":        "<code>/rmadmin @u</code>         — Demote admin",
         "help.warn":           "<code>/warn [@u] [lý do]</code>  — Cảnh cáo (auto-ban lúc max)",
         "help.warns":          "<code>/warns [@u]</code>          — Xem số lần cảnh cáo",
@@ -335,7 +340,8 @@ _T: dict[str, dict[str, str]] = {
         "addadmin.usage": (
             "❌ Cú pháp: <code>/addadmin @user [flags]</code>\n"
             "Flags: <code>del pin inv restrict topics promote info video post title:Tên</code>\n"
-            "Không truyền flag → dùng quyền mặc định (del, pin, inv, video)"
+            "<b>full</b> → tất cả quyền admin cùng lúc\n"
+            "Không truyền flag → mặc định (del, pin, inv, video)"
         ),
         "addadmin.done":  "👑 Đã promote <code>{uid}</code> thành admin",
         "addadmin.title": " (<b>{title}</b>)",
@@ -359,6 +365,10 @@ _T: dict[str, dict[str, str]] = {
             "Đảm bảo <code>GROUP_CONTEXT_ENABLED=true</code> trong config."
         ),
         "feed.header":      "📋 <b>{n} tin gần nhất</b> (buffer: {buf}):",
+        "feed.header.group":"📋 <b>{n} tin gần nhất</b> từ <code>{chat_id}</code> (buffer: {buf}):",
+        "feed.empty.group": "📋 Buffer của <code>{chat_id}</code> trống.\nĐảm bảo <code>GROUP_CONTEXT_ENABLED=true</code> trong config.",
+        "feed.no_data":     "📋 Chưa có dữ liệu feed.\nThêm bot vào nhóm với <code>GROUP_CONTEXT_ENABLED=true</code>, sau đó dùng <code>/feed &lt;group_id&gt; [n]</code>.",
+        "feed.multi_group": "📋 Có nhiều nhóm trong buffer. Chỉ định cụ thể:\n<code>/feed &lt;group_id&gt; [n]</code>\n\nCó sẵn:\n{ids}",
 
         # handlers.py
         "processing":      "⏳",
