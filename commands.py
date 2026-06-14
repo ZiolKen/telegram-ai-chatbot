@@ -34,7 +34,7 @@ from telegram.ext import ContextTypes
 
 import db
 import state
-from config import DEFAULT_LANG, DEFAULT_MODEL, ENABLE_FOLLOWUP, ENABLE_PLUGINS, MODELS, OWNER_ID
+from config import DEFAULT_LANG, DEFAULT_MODEL, ENABLE_FOLLOWUP, ENABLE_PLUGINS, GEMINI_KEYS, MODELS, OWNER_ID
 from handlers import _MODEL_LABELS
 from i18n import t, lang_list_str, lang_name, SUPPORTED
 
