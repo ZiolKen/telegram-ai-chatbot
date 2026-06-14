@@ -22,7 +22,7 @@ WEB_TOOL_DECLS = [
         "description": (
             "Search the internet for current information, news, facts, "
             "prices, or any topic that may have changed recently. "
-            "Prefer 'google' engine when GOOGLE_API_KEY is set."
+            "Engine is selected automatically; you only need to pass 'query'."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -30,8 +30,12 @@ WEB_TOOL_DECLS = [
                 "query":  {"type": "STRING", "description": "Search query"},
                 "engine": {
                     "type": "STRING",
-                    "description": "Search engine to use",
-                    "enum": ["duckduckgo", "google"],
+                    "description": (
+                        "Search engine override. "
+                        "Leave unset to use the best available engine automatically. "
+                        "Options: 'auto' (default), 'google', 'duckduckgo'."
+                    ),
+                    "enum": ["auto", "duckduckgo", "google"],
                 },
             },
             "required": ["query"],
@@ -113,34 +117,59 @@ def _is_safe_url(url: str) -> tuple[bool, str]:
 
 
 # ── Web Search ────────────────────────────────────────────────────────────
-async def web_search(query: str, engine: str = "duckduckgo") -> str:
-    if engine == "google" and GOOGLE_API_KEY and GOOGLE_CSE_ID:
-        return await _google(query)
+_GOOGLE_READY = bool(GOOGLE_API_KEY and GOOGLE_CSE_ID)
+
+
+async def web_search(query: str, engine: str = "auto") -> str:
+    """Engine selection:
+    - 'auto' (default): Google CSE nếu có key, ngược lại DDG.
+    - 'google': Google CSE; fallback DDG nếu lỗi.
+    - 'duckduckgo': DDG trực tiếp.
+    """
+    use_google = engine == "google" or (engine == "auto" and _GOOGLE_READY)
+    if use_google and _GOOGLE_READY:
+        result = await _google(query)
+        if result.startswith(("Lỗi Google", "Google Search lỗi")):
+            logger.warning("Google CSE lỗi, fallback DDG: %s", result)
+            return await _ddg(query)
+        return result
     return await _ddg(query)
 
 
 async def _ddg(query: str) -> str:
     try:
         from duckduckgo_search import DDGS
-        loop = asyncio.get_event_loop()
-        hits = await loop.run_in_executor(
-            None,
-            lambda: list(DDGS().text(query, max_results=6)),
-        )
-        if not hits:
-            return "Không tìm thấy kết quả."
-        lines = []
-        for h in hits:
-            title = h.get("title", "")
-            href  = h.get("href", "")
-            body  = h.get("body", "")[:350]
-            lines.append(f"**{title}**\n{href}\n{body}")
-        return "\n\n".join(lines)
+        from duckduckgo_search.exceptions import RatelimitException
     except ImportError:
         return "⚠️ duckduckgo-search chưa cài. Chạy: pip install duckduckgo-search"
-    except Exception as e:
-        logger.error("DDG search: %s", e)
-        return f"Lỗi tìm kiếm: {e}"
+
+    loop = asyncio.get_event_loop()
+    last_err = None
+    for attempt, delay in enumerate([0, 3, 8]):  # 3 lần: ngay / +3s / +8s
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            hits = await loop.run_in_executor(
+                None,
+                lambda: list(DDGS().text(query, max_results=6)),
+            )
+            if not hits:
+                return "Không tìm thấy kết quả."
+            lines = []
+            for h in hits:
+                title = h.get("title", "")
+                href  = h.get("href", "")
+                body  = h.get("body", "")[:350]
+                lines.append(f"**{title}**\n{href}\n{body}")
+            return "\n\n".join(lines)
+        except RatelimitException as e:
+            last_err = e
+            logger.warning("DDG rate limit (lần %d/3), thử lại sau %ds", attempt + 1, delay)
+            continue
+        except Exception as e:
+            logger.error("DDG search: %s", e)
+            return f"Lỗi tìm kiếm: {e}"
+    return "⚠️ DuckDuckGo rate limit sau 3 lần thử. Thử lại sau ít phút."
 
 
 async def _google(query: str) -> str:
