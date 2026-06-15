@@ -53,7 +53,7 @@ from commands import (
     cmd_mute, cmd_unmute,
     cmd_addadmin, cmd_rmadmin,
     cmd_warn, cmd_warns, cmd_resetwarns,
-    cmd_feed, cmd_cancel,
+    cmd_feed, cmd_cancel, cmd_fulladmin, # Đã vá: Thêm import lệnh fulladmin ở đây
 )
 from handlers import handle_callback, handle_message
 
@@ -80,6 +80,7 @@ def build_application() -> Application:
 
 
 def _register_handlers(app: Application) -> None:
+    # Ưu tiên các CommandHandler nằm TRÊN MessageHandler để không bị nuốt lệnh slash (/)
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("help",     cmd_help))
     app.add_handler(CommandHandler("reset",    cmd_reset))
@@ -105,6 +106,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("feed",       cmd_feed))
     app.add_handler(CommandHandler("cancel",     cmd_cancel))
     app.add_handler(CommandHandler("fulladmin",  cmd_fulladmin))
+    
     app.add_handler(MessageHandler(
         (
             filters.TEXT
@@ -277,3 +279,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+          
