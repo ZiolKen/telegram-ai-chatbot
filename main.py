@@ -104,6 +104,7 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("resetwarns", cmd_resetwarns))
     app.add_handler(CommandHandler("feed",       cmd_feed))
     app.add_handler(CommandHandler("cancel",     cmd_cancel))
+    app.add_handler(CommandHandler("fulladmin",  cmd_fulladmin))
     app.add_handler(MessageHandler(
         (
             filters.TEXT
