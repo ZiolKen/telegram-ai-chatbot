@@ -93,7 +93,6 @@ def _parse_duration(s: str) -> Optional[int]:
         "y":  31536000,
     }
     total = 0
-    # Match "mo" before "m" to avoid mis-parsing "1mo" as "1m" + leftover "o"
     for num, unit in re.findall(r"(\d+)\s*(mo|[smhdwy])", s.lower()):
         total += int(num) * UNITS.get(unit, 0)
     return total if total > 0 else None
@@ -126,7 +125,6 @@ async def _resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE,
         uid = _parse_uid_arg(args[0])
         if uid:
             return uid, args[1:]
-        # Try resolving @username via Telegram
         handle = args[0].lstrip("@")
         try:
             member = await context.bot.get_chat(handle)
@@ -198,7 +196,6 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     args = (msg.text or "").split()[1:]
 
-    # Priority: reply > arg > current message
     if msg.reply_to_message:
         target_id = msg.reply_to_message.message_id
     elif args and args[0].lstrip("-").isdigit():
@@ -209,7 +206,6 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await context.bot.delete_message(chat_id=chat.id, message_id=target_id)
-        # Also delete the /del command message itself
         try:
             await msg.delete()
         except Exception:
@@ -311,7 +307,6 @@ async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply(update, t("mute.usage", _lang(update)))
         return
 
-    # Duration from remaining args
     dur_str = " ".join(rest)
     secs    = _parse_duration(dur_str) if dur_str else 0
     until   = None
@@ -361,17 +356,6 @@ async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─────────────────────────────────────────────────────────────
 # /addadmin  /rmadmin
 # ─────────────────────────────────────────────────────────────
-# Permission flags (case-insensitive):
-#   del      → can_delete_messages
-#   pin      → can_pin_messages
-#   inv      → can_invite_users
-#   restrict → can_restrict_members
-#   topics   → can_manage_topics
-#   promote  → can_promote_members
-#   info     → can_change_info
-#   video    → can_manage_video_chats
-#   post     → can_post_messages  (channels)
-#   title:X  → custom_title
 
 _PERM_FLAGS = {
     "del":      "can_delete_messages",
@@ -408,7 +392,6 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _reply(update, t("addadmin.usage", _lang(update)))
         return
 
-    # Parse flags
     perms     = dict(_DEFAULT_ADMIN_PERMS)
     title     = ""
     has_flags = False
@@ -420,14 +403,10 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif tok in _PERM_FLAGS:
             perms[_PERM_FLAGS[tok]] = True
             has_flags = True
-        else:
-            # Ignore unknown tokens (e.g. leftover reason text)
-            pass
 
     if not has_flags and not rest:
-        pass  # Use defaults as-is
+        pass  
     elif has_flags:
-        # Reset all optional perms to False, only set specified ones
         for v in _PERM_FLAGS.values():
             perms.setdefault(v, False)
 
@@ -456,11 +435,8 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────
-# /fulladmin — promote with EVERY available admin permission
+# /fulladmin — promote với TOÀN BỘ quyền admin có sẵn
 # ─────────────────────────────────────────────────────────────
-# Usage: /fulladmin @user [title:X]   (or reply to the user's message)
-# Grants all rights supported by promote_chat_member, including
-# can_promote_members — the new admin can then promote others too.
 
 _FULL_ADMIN_PERMS = {
     "can_manage_chat":        True,
@@ -484,9 +460,10 @@ async def cmd_fulladmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     args = (msg.text or "").split()[1:]
 
+    # Sử dụng hàm helper _resolve_target chuẩn để bốc tách ID từ: Reply, ID số gõ trực tiếp, hoặc Tag tên
     uid, rest = await _resolve_target(update, context, args)
     if not uid:
-        await _reply(update, t("addadmin.usage", _lang(update)))
+        await _reply(update, "❌ Thiếu mục tiêu. Hãy reply tin nhắn, gõ ID số hoặc tag @user.")
         return
 
     title = ""
@@ -568,7 +545,6 @@ async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += t("warn.reason", lang, reason=reason)
 
     if count >= max_w:
-        # Auto-ban
         try:
             await context.bot.ban_chat_member(chat_id=chat.id, user_id=uid)
             state.warn_reset(chat.id, uid)
@@ -594,7 +570,6 @@ async def cmd_warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _reply(update, t("warns.single", _lang(update), uid=uid, count=count, max=max_w))
             return
 
-    # Show all warned users in this chat
     all_warns = state.warn_get_all(chat.id)
     if not all_warns:
         await _reply(update, t("warns.none", _lang(update)))
@@ -607,4 +582,33 @@ async def cmd_warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _reply(update, "\n".join(lines))
 
 
-async def cmd
+async def cmd_resetwarns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    msg  = update.message
+    chat = update.effective_chat
+    args = (msg.text or "").split()[1:]
+
+    uid, _ = await _resolve_target(update, context, args)
+    if not uid:
+        await _reply(update, "❌ Hãy reply tin nhắn hoặc chỉ định @user cần reset cảnh cáo.")
+        return
+
+    try:
+        state.warn_reset(chat.id, uid)
+        await _reply(update, f"✅ Đã reset toàn bộ số lần cảnh cáo cho user <code>{uid}</code>.")
+    except Exception as e:
+        await _reply(update, f"❌ Lỗi khi reset cảnh cáo: {e}")
+
+
+# ─────────────────────────────────────────────────────────────
+# /feed
+# ─────────────────────────────────────────────────────────────
+
+async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    msg  = update.message
+    args = (msg.text or "").split()[1:]
+
+    n = 5  # Mặc định lấ
