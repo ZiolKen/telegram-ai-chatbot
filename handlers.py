@@ -366,6 +366,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
+    # ── [DIRECTORY] Học id/username của mọi user bot thấy được ─
+    # (kể cả người không phải owner) để sau này @username có thể
+    # tự resolve ra user_id khi ban/mute/warn/... mà không cần ID số.
+    state.remember_user(user.id, user.username, user.full_name or "")
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        ru = msg.reply_to_message.from_user
+        state.remember_user(ru.id, ru.username, ru.full_name or "")
+    for ent in (msg.entities or []) + (msg.caption_entities or []):
+        eu = getattr(ent, "user", None)
+        if eu is not None:
+            state.remember_user(eu.id, eu.username, eu.full_name or "")
+    for nm in (msg.new_chat_members or []):
+        state.remember_user(nm.id, nm.username, nm.full_name or "")
+
     bot_username = context.bot.username
     is_private   = chat.type == ChatType.PRIVATE
 

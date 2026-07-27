@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from html import escape as _html_escape
 from typing import Optional
 
 from telegram import (
@@ -37,6 +38,7 @@ import state
 from config import DEFAULT_LANG, DEFAULT_MODEL, ENABLE_FOLLOWUP, ENABLE_PLUGINS, GEMINI_KEYS, MODELS, OWNER_ID
 from handlers import _MODEL_LABELS
 from i18n import t, lang_list_str, lang_name, SUPPORTED
+from tools_web import get_search_engine_status
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +127,14 @@ async def _resolve_target(update: Update, context: ContextTypes.DEFAULT_TYPE,
         uid = _parse_uid_arg(args[0])
         if uid:
             return uid, args[1:]
-        # Try resolving @username via Telegram
-        handle = args[0].lstrip("@")
+        # Try resolving @username: local directory first (learned passively
+        # from every message the bot has seen — works for regular group
+        # members, which Telegram's get_chat() usually cannot resolve),
+        # then fall back to get_chat() for channels/bots.
+        handle   = args[0].lstrip("@")
+        known_id = state.lookup_user_id(handle)
+        if known_id:
+            return known_id, args[1:]
         try:
             member = await context.bot.get_chat(handle)
             if hasattr(member, "id"):
@@ -392,6 +400,7 @@ _DEFAULT_ADMIN_PERMS = {
     "can_pin_messages":       True,
     "can_invite_users":       True,
     "can_manage_video_chats": True,
+    "can_manage_topics":      True,
 }
 
 # All non-channel permissions (used by the "full" flag)
@@ -800,6 +809,23 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wh_icon = "❓"
     wh_line = f"🔗 Webhook  : {wh_icon}"
 
+    # ── Web search engine diagnostics ───────────────────────────
+    se = get_search_engine_status()
+    if se["google_configured"]:
+        if se["ok"] is True:
+            se_line = f"🔍 Search   : ✅ Google CSE (last: {_html_escape(se['detail'][:60])})"
+        elif se["ok"] is False:
+            se_line = f"🔍 Search   : ⚠️ Google CSE lỗi, đang fallback DDG (last: {_html_escape(se['detail'][:80])})"
+        else:
+            se_line = "🔍 Search   : ✅ Google CSE đã cấu hình (chưa có lần gọi nào)"
+    else:
+        missing = []
+        if not se["google_api_key_set"]:
+            missing.append("GOOGLE_API_KEY")
+        if not se["google_cse_id_set"]:
+            missing.append("GOOGLE_CSE_ID")
+        se_line = f"🔍 Search   : ⚠️ DuckDuckGo only — thiếu env: {', '.join(missing)}"
+
     await _reply(update,
         f"{t('status.title', lang)}\n\n"
         f"{t('status.conv', lang)}   : <code>{cid}</code>\n"
@@ -807,6 +833,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t('status.model', lang)}  : <b>{label}</b>\n"
         f"{key_line}\n"
         f"{wh_line}\n"
+        f"{se_line}\n"
         f"{t('status.plugins', lang)}: {plug_icon}\n"
         f"{t('status.followup', lang)}: {follow_icon}\n"
         f"{t('status.topic', lang)}: {topic_icon}\n"

@@ -142,6 +142,48 @@ def get_max_warns() -> int:
     return MAX_WARNS
 
 
+# ── User directory (username → user_id resolution) ───────────────────────────
+# Telegram's Bot API cannot reliably resolve "@username" → user_id for regular
+# group members (get_chat only works for channels/bots/users who already have
+# a chat with the bot). So instead we passively learn (user_id, username) for
+# every user the bot ever sees a message/callback/mention from, and persist it
+# via the generic bot_config key/value store (key = "user:{user_id}").
+_user_directory: dict[int, dict] = {}   # user_id -> {"username": str|None, "name": str}
+_username_to_id: dict[str, int]  = {}   # lowercase username (no @) -> user_id
+
+
+def remember_user(user_id: Optional[int], username: Optional[str] = None,
+                   name: str = "") -> None:
+    """Passively record a user's id/username/name so a later @username can be
+    resolved back to a numeric id. Cheap no-op if nothing actually changed."""
+    if not user_id:
+        return
+    uname = (username or "").lstrip("@").lower() or None
+    prev  = _user_directory.get(user_id)
+    if prev and prev.get("username") == uname and (not name or prev.get("name") == name):
+        return  # nothing new to persist
+    if prev and prev.get("username") and prev.get("username") != uname:
+        _username_to_id.pop(prev["username"], None)
+    entry = {"username": uname, "name": name or (prev or {}).get("name", "")}
+    _user_directory[user_id] = entry
+    if uname:
+        _username_to_id[uname] = user_id
+    _fire(db.config_set(f"user:{user_id}", entry))
+
+
+def lookup_user_id(handle: str) -> Optional[int]:
+    """Resolve '@username' or 'username' (case-insensitive) → user_id using
+    the locally learned directory. Returns None if never seen before."""
+    h = handle.strip().lstrip("@").lower()
+    if not h:
+        return None
+    return _username_to_id.get(h)
+
+
+def get_known_user(user_id: int) -> Optional[dict]:
+    return _user_directory.get(user_id)
+
+
 # ── Startup loader ────────────────────────────────────────────────────────────
 async def load_all_async() -> None:
     if not db.is_ready():
@@ -168,16 +210,28 @@ async def load_all_async() -> None:
                     _warns[(int(parts[1]), int(parts[2]))] = int(value)
                 except (ValueError, IndexError):
                     pass
+        elif key.startswith("user:"):
+            # "user:{user_id}" → {"username": str|None, "name": str}
+            try:
+                uid = int(key.split(":", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            if isinstance(value, dict):
+                _user_directory[uid] = value
+                uname = value.get("username")
+                if uname:
+                    _username_to_id[uname] = uid
 
     convs = await db.conv_load_all(MAX_HISTORY)
     _conversations.update(convs)
 
     _log.info(
-        "[state] Loaded: %d topic_mode, %d conv_cfg, %d conversations, %d warn entries.",
+        "[state] Loaded: %d topic_mode, %d conv_cfg, %d conversations, %d warn entries, %d known users.",
         sum(1 for k in all_cfg if k.startswith("topic_mode:")),
         sum(1 for k in all_cfg if k.startswith("conv_cfg:")),
         len(_conversations),
         len(_warns),
+        len(_user_directory),
     )
 
 

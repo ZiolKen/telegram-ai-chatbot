@@ -17,6 +17,7 @@ import ipaddress
 import logging
 import random
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import aiohttp
@@ -26,6 +27,11 @@ from config import GOOGLE_API_KEY, GOOGLE_CSE_ID
 
 logger = logging.getLogger(__name__)
 
+
+def datetime_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 # Evaluated once at startup — logged so misconfiguration is visible.
 _GOOGLE_READY = bool(GOOGLE_API_KEY and GOOGLE_CSE_ID)
 if _GOOGLE_READY:
@@ -33,6 +39,25 @@ if _GOOGLE_READY:
                 GOOGLE_API_KEY, GOOGLE_CSE_ID)
 else:
     logger.info("[web] Google CSE not configured — will use DuckDuckGo")
+
+# Diagnostics — surfaced via /status so misconfiguration is visible without
+# having to dig through Render logs. Updated on every _google() call.
+_last_google_result: dict = {
+    "ok": None,          # True / False / None (never called)
+    "detail": "",        # human-readable outcome of the most recent call
+    "at": None,          # datetime of the most recent attempt
+}
+
+
+def get_search_engine_status() -> dict:
+    """Snapshot of web-search engine configuration + last-call diagnostics,
+    used by /status to help diagnose why CSE might not be in use."""
+    return {
+        "google_configured": _GOOGLE_READY,
+        "google_api_key_set": bool(GOOGLE_API_KEY),
+        "google_cse_id_set": bool(GOOGLE_CSE_ID),
+        **_last_google_result,
+    }
 
 
 # ── Tool declarations ─────────────────────────────────────────────────────
@@ -169,40 +194,59 @@ async def _google(query: str) -> str | None:
         "q":   query,
         "num": 8,
     }
+
+    def _record(ok: bool, detail: str) -> None:
+        _last_google_result["ok"]     = ok
+        _last_google_result["detail"] = detail
+        _last_google_result["at"]     = datetime_now_iso()
+
     try:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15)
         ) as s:
             async with s.get(url, params=params) as r:
-                if r.status == 429:
-                    logger.warning("[web] Google CSE rate-limited (429)")
-                    return None
-                if r.status == 403:
-                    logger.error("[web] Google CSE 403 — check API key / CSE ID")
-                    return None
                 if r.status != 200:
-                    logger.error("[web] Google CSE HTTP %d", r.status)
+                    # Log the actual response body — the real reason (invalid
+                    # key, CSE ID not configured for whole-web search, API
+                    # not enabled on the GCP project, etc.) is almost always
+                    # in here, not just the status code.
+                    body = (await r.text())[:500]
+                    if r.status == 429:
+                        logger.warning("[web] Google CSE rate-limited (429): %s", body)
+                        _record(False, f"HTTP 429 (rate-limited): {body}")
+                    elif r.status == 403:
+                        logger.error("[web] Google CSE 403 — check API key / CSE ID: %s", body)
+                        _record(False, f"HTTP 403 (key/CSE ID/billing issue): {body}")
+                    else:
+                        logger.error("[web] Google CSE HTTP %d: %s", r.status, body)
+                        _record(False, f"HTTP {r.status}: {body}")
                     return None
                 data = await r.json()
 
         items = data.get("items", [])
         if not items:
             # Return empty-string sentinel so caller knows Google worked
-            # but found nothing (no need to fall back to DDG).
+            # but found nothing (no need to fall back to DDG). This usually
+            # means the CSE isn't configured to "Search the entire web".
+            _record(True, "200 OK but 0 items — check CSE 'Search the entire web' setting")
             return "Không tìm thấy kết quả nào."
 
         lines = [
             f"**{i.get('title', '')}**\n{i.get('link', '')}\n{i.get('snippet', '')}"
             for i in items
         ]
+        _record(True, f"200 OK — {len(items)} items")
         return "\n\n".join(lines)
 
     except asyncio.TimeoutError:
         logger.warning("[web] Google CSE timeout")
+        _record(False, "Timeout after 15s")
         return None
     except Exception as e:
         logger.error("[web] Google CSE unexpected error: %s", e)
+        _record(False, f"Exception: {e}")
         return None
+
 
 
 # ── DuckDuckGo ────────────────────────────────────────────────────────────

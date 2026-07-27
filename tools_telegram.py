@@ -18,6 +18,8 @@ from telegram import (
     ReactionTypeEmoji,
 )
 
+import state
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,50 @@ def _resolve_chat(ctx: TelegramContext, chat_id_arg: Any) -> int | str:
             return int(raw)
         return raw  # @username
     return ctx.chat_id
+
+
+async def _resolve_user(ctx: TelegramContext, user_id_or_username: Any) -> Optional[int]:
+    """
+    Resolve a tool-provided user_id argument to a numeric Telegram user ID.
+
+    Accepts:
+      • a numeric ID (int, or numeric string) → returned as-is
+      • "@username" / "username" → looked up in the locally-learned user
+        directory first (works for any user the bot has seen a message
+        from — including regular group members, which Telegram's
+        get_chat() usually CANNOT resolve), then falls back to
+        ctx.bot.get_chat() for channels/bots/public entities.
+
+    Returns None if resolution fails.
+    """
+    if user_id_or_username is None:
+        return None
+    raw = str(user_id_or_username).strip()
+    if raw.lstrip("-").isdigit():
+        return int(raw)
+
+    handle = raw.lstrip("@")
+    known_id = state.lookup_user_id(handle)
+    if known_id:
+        return known_id
+
+    try:
+        chat = await ctx.bot.get_chat(f"@{handle}")
+        if getattr(chat, "id", None):
+            return chat.id
+    except Exception as e:
+        logger.debug("[tg] get_chat fallback failed for @%s: %s", handle, e)
+
+    return None
+
+
+def _user_not_found_msg(raw: Any) -> str:
+    return (
+        f"❌ Không tìm được user_id cho '{raw}'. Bot chỉ tự resolve được "
+        f"@username nếu đã từng thấy tin nhắn của người đó trong nhóm. "
+        f"Hãy reply vào tin nhắn của họ, hoặc cung cấp user ID dạng số."
+    )
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -128,7 +174,7 @@ TG_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id": {"type": "NUMBER", "description": "Telegram user ID to ban"},
+                "user_id": {"type": "STRING", "description": "Telegram user ID (number) or @username." + " Bot auto-resolves @username if it has seen that user before; use tg_resolve_user to check first if unsure."},
                 "chat_id": {"type": "STRING", "description": "Chat ID (default: current)"},
                 "reason":  {"type": "STRING", "description": "Ban reason (optional, shown in audit log)"},
             },
@@ -141,7 +187,7 @@ TG_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id": {"type": "NUMBER"},
+                "user_id": {"type": "STRING", "description": "User ID (number) or @username."},
                 "chat_id": {"type": "STRING", "description": "Chat ID (default: current)"},
             },
             "required": ["user_id"],
@@ -153,7 +199,7 @@ TG_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id":          {"type": "NUMBER", "description": "User ID to mute"},
+                "user_id":          {"type": "STRING", "description": "User ID (number) or @username to mute."},
                 "duration_minutes": {"type": "NUMBER", "description": "Mute duration in minutes (0 = permanent)"},
                 "chat_id":          {"type": "STRING", "description": "Chat ID (default: current)"},
             },
@@ -166,7 +212,7 @@ TG_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id": {"type": "NUMBER"},
+                "user_id": {"type": "STRING", "description": "User ID (number) or @username."},
                 "chat_id": {"type": "STRING"},
             },
             "required": ["user_id"],
@@ -257,7 +303,7 @@ TG_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id":                {"type": "NUMBER"},
+                "user_id":                {"type": "STRING", "description": "User ID (số) hoặc @username."},
                 "chat_id":                {"type": "STRING"},
                 "can_delete_messages":    {"type": "BOOLEAN"},
                 "can_manage_topics":      {"type": "BOOLEAN"},
@@ -275,7 +321,7 @@ TG_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id": {"type": "NUMBER"},
+                "user_id": {"type": "STRING", "description": "User ID (number) or @username."},
                 "chat_id": {"type": "STRING"},
             },
             "required": ["user_id"],
@@ -393,9 +439,12 @@ async def tg_unpin_message(ctx: TelegramContext, message_id=None,
 async def tg_ban_user(ctx: TelegramContext, user_id: int,
                        chat_id=None, reason: str = "") -> str:
     target = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     try:
-        await ctx.bot.ban_chat_member(chat_id=target, user_id=int(user_id))
-        msg = f"✅ Đã ban user {user_id}"
+        await ctx.bot.ban_chat_member(chat_id=target, user_id=uid)
+        msg = f"✅ Đã ban user {uid}"
         if reason:
             msg += f" (lý do: {reason})"
         return msg + "."
@@ -407,11 +456,14 @@ async def tg_ban_user(ctx: TelegramContext, user_id: int,
 async def tg_unban_user(ctx: TelegramContext, user_id: int,
                          chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     try:
         await ctx.bot.unban_chat_member(
-            chat_id=target, user_id=int(user_id), only_if_banned=True
+            chat_id=target, user_id=uid, only_if_banned=True
         )
-        return f"✅ Đã unban user {user_id}."
+        return f"✅ Đã unban user {uid}."
     except Exception as e:
         logger.error("tg_unban: %s", e)
         return f"❌ Unban thất bại: {e}"
@@ -420,6 +472,9 @@ async def tg_unban_user(ctx: TelegramContext, user_id: int,
 async def tg_mute_user(ctx: TelegramContext, user_id: int,
                         duration_minutes: float = 0, chat_id=None) -> str:
     target  = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     perms   = ChatPermissions(can_send_messages=False)
     until   = None
     if duration_minutes and duration_minutes > 0:
@@ -427,12 +482,12 @@ async def tg_mute_user(ctx: TelegramContext, user_id: int,
     try:
         await ctx.bot.restrict_chat_member(
             chat_id    = target,
-            user_id    = int(user_id),
+            user_id    = uid,
             permissions= perms,
             until_date = until,
         )
         dur = f"{duration_minutes} phút" if duration_minutes else "vĩnh viễn"
-        return f"✅ Đã mute user {user_id} ({dur})."
+        return f"✅ Đã mute user {uid} ({dur})."
     except Exception as e:
         logger.error("tg_mute: %s", e)
         return f"❌ Mute thất bại: {e}"
@@ -441,6 +496,9 @@ async def tg_mute_user(ctx: TelegramContext, user_id: int,
 async def tg_unmute_user(ctx: TelegramContext, user_id: int,
                           chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     perms  = ChatPermissions(
         can_send_messages        = True,
         can_send_polls           = True,
@@ -452,9 +510,9 @@ async def tg_unmute_user(ctx: TelegramContext, user_id: int,
     )
     try:
         await ctx.bot.restrict_chat_member(
-            chat_id=target, user_id=int(user_id), permissions=perms
+            chat_id=target, user_id=uid, permissions=perms
         )
-        return f"✅ Đã unmute user {user_id}."
+        return f"✅ Đã unmute user {uid}."
     except Exception as e:
         logger.error("tg_unmute: %s", e)
         return f"❌ Unmute thất bại: {e}"
@@ -565,16 +623,19 @@ async def tg_send_dice(ctx: TelegramContext, emoji: str,
 async def tg_promote_admin(ctx: TelegramContext, user_id: int,
                             chat_id=None,
                             can_delete_messages: bool = True,
-                            can_manage_topics:   bool = False,
+                            can_manage_topics:   bool = True,
                             can_pin_messages:    bool = True,
                             can_invite_users:    bool = True,
                             can_restrict_members:bool = False,
                             custom_title: str    = "") -> str:
     target = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     try:
         await ctx.bot.promote_chat_member(
             chat_id               = target,
-            user_id               = int(user_id),
+            user_id               = uid,
             can_delete_messages   = can_delete_messages,
             can_manage_topics     = can_manage_topics,
             can_pin_messages      = can_pin_messages,
@@ -584,9 +645,9 @@ async def tg_promote_admin(ctx: TelegramContext, user_id: int,
         )
         if custom_title:
             await ctx.bot.set_chat_administrator_custom_title(
-                chat_id=target, user_id=int(user_id), custom_title=custom_title[:16]
+                chat_id=target, user_id=uid, custom_title=custom_title[:16]
             )
-        return f"✅ Đã promote user {user_id} thành admin."
+        return f"✅ Đã promote user {uid} thành admin."
     except Exception as e:
         return f"❌ Promote thất bại: {e}"
 
@@ -594,10 +655,13 @@ async def tg_promote_admin(ctx: TelegramContext, user_id: int,
 async def tg_demote_admin(ctx: TelegramContext, user_id: int,
                            chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     try:
         await ctx.bot.promote_chat_member(
             chat_id               = target,
-            user_id               = int(user_id),
+            user_id               = uid,
             can_manage_chat       = False,
             can_delete_messages   = False,
             can_manage_video_chats= False,
@@ -607,7 +671,7 @@ async def tg_demote_admin(ctx: TelegramContext, user_id: int,
             can_invite_users      = False,
             can_pin_messages      = False,
         )
-        return f"✅ Đã demote user {user_id} (xóa quyền admin)."
+        return f"✅ Đã demote user {uid} (xóa quyền admin)."
     except Exception as e:
         return f"❌ Demote thất bại: {e}"
 
@@ -1104,10 +1168,26 @@ TG_TOOL_DECLS.extend([
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id":  {"type": "NUMBER", "description": "Telegram user ID cần mời"},
+                "user_id":  {"type": "STRING", "description": "Telegram user ID (số) hoặc @username."},
                 "chat_id":  {"type": "STRING", "description": "Chat ID đích (mặc định: hiện tại)"},
             },
             "required": ["user_id"],
+        },
+    },
+    {
+        "name": "tg_resolve_user",
+        "description": (
+            "Tra numeric Telegram user ID từ @username. Dùng khi cần xác nhận "
+            "user_id trước khi ban/mute/warn/promote/... hoặc khi muốn báo lỗi "
+            "rõ ràng nếu bot chưa từng thấy user đó (thay vì để hành động thất bại). "
+            "Chỉ resolve được nếu bot đã từng thấy tin nhắn/mention của user này trước đó."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "username": {"type": "STRING", "description": "@username hoặc username (không cần @)"},
+            },
+            "required": ["username"],
         },
     },
     {
@@ -1144,7 +1224,7 @@ TG_TOOL_DECLS.extend([
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id": {"type": "NUMBER", "description": "Telegram user ID"},
+                "user_id": {"type": "STRING", "description": "Telegram user ID (số) hoặc @username."},
                 "chat_id": {"type": "STRING", "description": "Chat để kiểm tra status (mặc định: hiện tại)"},
             },
             "required": ["user_id"],
@@ -1156,7 +1236,7 @@ TG_TOOL_DECLS.extend([
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id": {"type": "NUMBER"},
+                "user_id": {"type": "STRING", "description": "User ID (số) hoặc @username."},
                 "title":   {"type": "STRING", "description": "Title hiển thị (tối đa 16 ký tự)"},
                 "chat_id": {"type": "STRING"},
             },
@@ -1207,12 +1287,27 @@ async def tg_create_invite_link(ctx: TelegramContext, chat_id=None,
 
 async def tg_invite_user(ctx: TelegramContext, user_id: int, chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     try:
-        await ctx.bot.add_chat_member(chat_id=target, user_id=int(user_id))
-        return f"✅ Đã thêm user {user_id} vào {target}."
+        await ctx.bot.add_chat_member(chat_id=target, user_id=uid)
+        return f"✅ Đã thêm user {uid} vào {target}."
     except Exception as e:
         logger.error("tg_invite_user: %s", e)
         return f"❌ Mời user thất bại: {e}"
+
+
+async def tg_resolve_user(ctx: TelegramContext, username: str) -> str:
+    handle = str(username).strip().lstrip("@")
+    if not handle:
+        return "❌ Thiếu username cần tra."
+    uid = await _resolve_user(ctx, f"@{handle}")
+    if uid is None:
+        return _user_not_found_msg(f"@{handle}")
+    known = state.get_known_user(uid)
+    extra = f" ({known['name']})" if known and known.get("name") else ""
+    return f"✅ @{handle} → user_id: {uid}{extra}"
 
 
 async def tg_send_media_group(ctx: TelegramContext, media: list,
@@ -1248,7 +1343,9 @@ async def tg_send_media_group(ctx: TelegramContext, media: list,
 
 async def tg_get_user_info(ctx: TelegramContext, user_id: int, chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
-    uid    = int(user_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     lines  = []
     try:
         member = await ctx.bot.get_chat_member(chat_id=target, user_id=uid)
@@ -1265,18 +1362,27 @@ async def tg_get_user_info(ctx: TelegramContext, user_id: int, chat_id=None) -> 
         if u.is_bot:
             lines.append("🤖 Bot: Có")
     except Exception:
+        known = state.get_known_user(uid)
         lines.append(f"🆔 ID: {uid} (không lấy được thông tin từ chat này)")
+        if known:
+            if known.get("name"):
+                lines.append(f"👤 {known['name']}")
+            if known.get("username"):
+                lines.append(f"🔗 @{known['username']}")
     return "\n".join(lines) if lines else f"Không tìm thấy user {uid}."
 
 
 async def tg_set_user_title(ctx: TelegramContext, user_id: int,
                              title: str, chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id)
     try:
         await ctx.bot.set_chat_administrator_custom_title(
-            chat_id=target, user_id=int(user_id), custom_title=title[:16]
+            chat_id=target, user_id=uid, custom_title=title[:16]
         )
-        return f"✅ Đã đặt title '{title}' cho user {user_id}."
+        return f"✅ Đã đặt title '{title}' cho user {uid}."
     except Exception as e:
         return f"❌ Đặt title thất bại: {e}"
 
@@ -1284,6 +1390,7 @@ async def tg_set_user_title(ctx: TelegramContext, user_id: int,
 TG_HANDLERS["tg_leave_chat"]        = tg_leave_chat
 TG_HANDLERS["tg_create_invite_link"]= tg_create_invite_link
 TG_HANDLERS["tg_invite_user"]       = tg_invite_user
+TG_HANDLERS["tg_resolve_user"]      = tg_resolve_user
 TG_HANDLERS["tg_send_media_group"]  = tg_send_media_group
 TG_HANDLERS["tg_get_user_info"]     = tg_get_user_info
 TG_HANDLERS["tg_set_user_title"]    = tg_set_user_title
@@ -1291,6 +1398,7 @@ TG_HANDLERS["tg_set_user_title"]    = tg_set_user_title
 TOOL_STATUS["tg_leave_chat"]         = "🚪 Đang thoát chat…"
 TOOL_STATUS["tg_create_invite_link"] = "🔗 Đang tạo invite link…"
 TOOL_STATUS["tg_invite_user"]        = "➕ Đang mời user…"
+TOOL_STATUS["tg_resolve_user"]       = "🔎 Đang tra user_id…"
 TOOL_STATUS["tg_send_media_group"]   = "🖼️ Đang gửi album…"
 TOOL_STATUS["tg_get_user_info"]      = "👤 Đang lấy thông tin user…"
 TOOL_STATUS["tg_set_user_title"]     = "🏷️ Đang đặt title…"

@@ -107,7 +107,7 @@ _T: dict[str, dict[str, str]] = {
         "status.db.off":   "\n\n🗄️ PostgreSQL: ⚠️ In-memory only",
 
         # Moderation
-        "need.target":      "❌ Reply to a message or provide @user.",
+        "need.target":      "❌ Reply to a message, provide a numeric user ID, or @username (only works if the bot has already seen a message from that user).",
         "need.reply":       "❌ Reply to the message to delete or provide a message ID.",
         "need.reply.pin":   "❌ Reply to the message to pin.",
         "del.fail":         "❌ Delete failed: <code>{err}</code>",
@@ -282,7 +282,7 @@ _T: dict[str, dict[str, str]] = {
         "status.db.off":   "\n\n🗄️ PostgreSQL: ⚠️ In-memory only",
 
         # Moderation
-        "need.target":      "❌ Cung cấp @user hoặc reply vào tin nhắn của họ.",
+        "need.target":      "❌ Reply vào tin nhắn của họ, cung cấp user ID (số), hoặc @username (chỉ dùng được nếu bot đã từng thấy tin nhắn của người đó).",
         "need.reply":       "❌ Reply vào tin nhắn cần xóa hoặc cung cấp message ID.",
         "need.reply.pin":   "❌ Reply vào tin nhắn cần ghim.",
         "del.fail":         "❌ Xóa thất bại: <code>{err}</code>",
