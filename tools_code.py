@@ -1,15 +1,37 @@
 """
-Safe Python code interpreter.
-Runs code in a subprocess with a hard timeout; captures stdout/stderr.
-Includes AST + regex pre-scan to block dangerous patterns (#1).
+Python code interpreter — owner-only sandbox.
+
+This bot gates ALL AI/tool interactions to OWNER_ID (see handlers.py:
+`if not is_owner: ... return`), so run_python is never reachable by anyone
+except the bot owner. Because of that, this sandbox intentionally does NOT
+block os/network/filesystem access — the owner explicitly wants a general
+"run whatever Python I ask for" tool.
+
+Still isolated by:
+  • separate subprocess (not in-process exec)
+  • hard wall-clock timeout
+  • explicit, minimal env passed to the subprocess (does NOT inherit the
+    bot's full environment — BOT_TOKEN / DATABASE_URL / GEMINI_KEYS etc.
+    are never visible to sandboxed code, only DB_READONLY_URL + PATH)
+  • output truncated before being sent back to Telegram
+
+If you ever change the owner-only gate in handlers.py, revisit this file —
+the two are coupled.
 """
-import ast
 import asyncio
+import io as _io
 import logging
-import re
+import os
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timezone
+from typing import Optional, TYPE_CHECKING
+
+import config
+
+if TYPE_CHECKING:
+    from tools_telegram import TelegramContext
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +41,24 @@ CODE_TOOL_DECLS = [
         "name": "run_python",
         "description": (
             "Execute Python 3 code and return its stdout/stderr output. "
-            "Useful for maths, data processing, sorting, encryption, "
-            "string manipulation, or any calculation task. "
-            "Has access to: math, json, re, datetime, random, itertools, "
-            "functools, collections, statistics, base64, hashlib, decimal."
+            "Full standard library is available (os, sys, subprocess, "
+            "pathlib, socket, urllib, etc.) plus whatever third-party "
+            "packages are installed in the bot's venv (requests, aiohttp, "
+            "asyncpg, beautifulsoup4, ...). Code can read/write files and "
+            "make outbound network requests. "
+            "A read-only Postgres connection string is available as the "
+            "env var DB_READONLY_URL — use asyncpg (already installed) to "
+            "run SELECT queries against the bot's database, e.g.:\n"
+            "import asyncio, asyncpg, os\n"
+            "async def main():\n"
+            "    conn = await asyncpg.connect(os.environ['DB_READONLY_URL'])\n"
+            "    rows = await conn.fetch('SELECT ...')\n"
+            "    print(rows)\n"
+            "    await conn.close()\n"
+            "asyncio.run(main())\n"
+            "This tool only runs for the bot owner — there is no other "
+            "sandboxing, so be careful with destructive filesystem/network "
+            "operations."
         ),
         "parameters": {
             "type": "OBJECT",
@@ -37,81 +73,11 @@ CODE_TOOL_DECLS = [
     },
 ]
 
-# ── Security: blocked modules (#1) ───────────────────────────────────────
-_BLOCKED_MODULES = {
-    "os", "sys", "subprocess", "socket", "shutil", "pathlib",
-    "importlib", "ctypes", "multiprocessing", "threading",
-    "signal", "resource", "pty", "tty", "termios",
-    "http", "urllib", "urllib2", "requests", "aiohttp", "httpx",
-    "ftplib", "smtplib", "poplib", "imaplib", "telnetlib",
-    "paramiko", "fabric", "pexpect",
-    "sqlite3", "psycopg2", "pymongo", "redis",
-    "pickle", "shelve", "marshal",
-    "code", "codeop", "compileall", "py_compile",
-    "builtins",
-}
-
-_BLOCKED_PATTERNS = [
-    r"__import__\s*\(",
-    r"__builtins__",
-    r"__class__\s*\.",
-    r"__subclasses__\s*\(",
-    r"getattr\s*\(\s*\w+\s*,\s*['\"]__",
-    r"globals\s*\(\s*\)",
-    r"locals\s*\(\s*\)",
-    r"vars\s*\(\s*\)",
-    r"exec\s*\(",
-    r"eval\s*\(",
-    r"compile\s*\(",
-    r"open\s*\(",
-    r"input\s*\(",
-]
-
-
-def _check_safe(code: str) -> str | None:
-    """
-    Returns None if code is safe.
-    Returns error message if dangerous pattern detected.
-    """
-    # 1. AST parse — check import statements
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        return f"❌ Syntax error: {e}"
-
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            if isinstance(node, ast.Import):
-                mods = [alias.name.split(".")[0] for alias in node.names]
-            else:
-                mods = [node.module.split(".")[0]] if node.module else []
-            for mod in mods:
-                if mod in _BLOCKED_MODULES:
-                    return f"❌ Module <code>{mod}</code> không được phép."
-
-    # 2. Regex scan for bypass patterns
-    for pattern in _BLOCKED_PATTERNS:
-        m = re.search(pattern, code)
-        if m:
-            return f"❌ Pattern không được phép: <code>{m.group()}</code>"
-
-    return None  # Safe
-
-
 # ── Sandbox wrapper ───────────────────────────────────────────────────────
-_ALLOWED_IMPORTS = (
-    "import math, json, re, datetime, random, itertools, "
-    "functools, collections, statistics, base64, hashlib, decimal, time, string\n"
-    "from datetime import datetime as _dt, timedelta\n"
-    "from decimal import Decimal\n"
-    "from collections import Counter, defaultdict, OrderedDict\n"
-)
-
+# No import restrictions anymore — full stdlib + installed packages.
 _WRAPPER = textwrap.dedent("""\
-{allowed}
 import sys, io as _io
-_buf = _io.StringIO()
-sys.stdout = sys.stderr = _buf
+sys.stdout = sys.stderr = _buf = _io.StringIO()
 try:
 {code}
 except Exception as _e:
@@ -122,15 +88,66 @@ finally:
 print(_buf.getvalue(), end="")
 """)
 
+_TIMEOUT_SECONDS = 60
+_TG_TEXT_LIMIT   = 3800   # leave headroom under Telegram's 4096 cap for HTML tags
 
-async def run_python(code: str) -> str:
-    # Security scan before execution (#1)
-    err = _check_safe(code)
-    if err:
-        return err
+# Explicit env for the subprocess — minimal, does NOT inherit bot secrets.
+def _sandbox_env() -> dict:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+    }
+    if config.DB_READONLY_URL:
+        env["DB_READONLY_URL"] = config.DB_READONLY_URL
+    return env
 
+
+async def _mirror_to_owner(tg_ctx: "TelegramContext", code: str, output: str) -> None:
+    """
+    Audit log: always send the FULL code + FULL output straight to the owner's
+    chat, independent of whatever the AI decides to say afterwards. This is
+    the source of truth — the model's chat reply may summarize/omit things,
+    this never does.
+    Never raises — a mirror failure must not break the actual tool result.
+    """
+    ts   = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    body = f"🔎 run_python @ {ts}\n\n――― code ―――\n{code}\n\n――― output ―――\n{output}"
+
+    try:
+        if len(body) <= _TG_TEXT_LIMIT:
+            html = (
+                f"🔎 <b>run_python</b> @ {ts}\n\n"
+                f"<b>― code ―</b>\n<pre><code>{_escape(code)}</code></pre>\n"
+                f"<b>― output ―</b>\n<pre><code>{_escape(output)}</code></pre>"
+            )
+            await tg_ctx.bot.send_message(
+                chat_id=tg_ctx.chat_id,
+                text=html,
+                parse_mode="HTML",
+                message_thread_id=tg_ctx.thread_id,
+            )
+        else:
+            from telegram import InputFile
+            buf = _io.BytesIO(body.encode("utf-8"))
+            fname = f"run_python_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}.txt"
+            await tg_ctx.bot.send_document(
+                chat_id=tg_ctx.chat_id,
+                document=InputFile(buf, filename=fname),
+                caption=f"🔎 run_python @ {ts} (full code+output, too long for a message)",
+                message_thread_id=tg_ctx.thread_id,
+            )
+    except Exception as e:
+        logger.error("run_python mirror failed: %s", e)
+
+
+def _escape(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def run_python(code: str, tg_ctx: Optional["TelegramContext"] = None) -> str:
     indented = textwrap.indent(code, "    ")
-    script   = _WRAPPER.format(allowed=_ALLOWED_IMPORTS, code=indented)
+    script   = _WRAPPER.format(code=indented)
 
     loop = asyncio.get_event_loop()
     try:
@@ -140,17 +157,28 @@ async def run_python(code: str) -> str:
                 [sys.executable, "-c", script],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=_TIMEOUT_SECONDS,
+                env=_sandbox_env(),
             ),
         )
-        output = (result.stdout or "") + (result.stderr or "")
-        if not output.strip():
-            output = "(không có output)"
+        full_output = (result.stdout or "") + (result.stderr or "")
+        if not full_output.strip():
+            full_output = "(không có output)"
+
+        if tg_ctx is not None:
+            await _mirror_to_owner(tg_ctx, code, full_output)
+
+        output = full_output
         if len(output) > 3500:
             output = output[:3500] + "\n…[output bị cắt bớt]"
         return f"<pre><code>{output.rstrip()}</code></pre>"
     except subprocess.TimeoutExpired:
-        return "❌ Code chạy quá 15 giây, đã dừng."
+        msg = f"❌ Code chạy quá {_TIMEOUT_SECONDS} giây, đã dừng."
+        if tg_ctx is not None:
+            await _mirror_to_owner(tg_ctx, code, msg)
+        return msg
     except Exception as e:
         logger.error("run_python: %s", e)
+        if tg_ctx is not None:
+            await _mirror_to_owner(tg_ctx, code, f"❌ Lỗi thực thi: {e}")
         return "❌ Có lỗi khi thực thi code."

@@ -11,7 +11,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 |---|---|
 | **AI** | Gemini 3.x / 2.x models, multi-key rotation, multi-model fallback, multi-turn function calling (up to 12 rounds/message) |
 | **Web** | Tavily (primary) & DuckDuckGo (fallback) search, full-page URL fetch, ArXiv paper search |
-| **Code** | Safe Python sandbox — subprocess with 15s timeout, AST security scan, no network/filesystem access |
+| **Code** | `run_python` — full Python (stdlib + installed packages, incl. network/filesystem, 60s timeout), owner-only, every run mirrored to the owner's chat as an audit log |
 | **Messaging** | Send text, photos, stickers, GIFs, polls, dice to any chat or channel |
 | **Files** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 256 MB |
 | **Moderation** | Ban, unban, mute, unmute users; warn system with auto-ban at 3 warnings (default); `/feed` buffer (last 100 messages) with inline action buttons — the **Reply** button sends a ForceReply prompt so you can type a response that gets forwarded to the original group message without leaving your private chat |
@@ -65,6 +65,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | `FOLLOWUP_COUNT` | `3` | Number of follow-up questions to generate |
 | `MESSAGE_MERGE_DELAY` | `1.5` | Seconds to wait before processing, to merge rapid consecutive messages |
 | `TAVILY_API_KEY` | `""` | Tavily API key (optional, primary web_search engine; falls back to DuckDuckGo if unset). Uses `search_depth=advanced` (2 credits/call, deeper & more relevant snippets) — free tier gives 1,000 credits/month = ~500 searches |
+| `DB_READONLY_URL` | `""` | Optional read-only PostgreSQL connection string, exposed **only** to the `run_python` sandbox (env var) so the AI can query the DB via `asyncpg` without ever touching the writable `DATABASE_URL`. See [Security notes](#security-notes) for how to get one on Aiven. |
 
 ---
 
@@ -190,7 +191,7 @@ The agent automatically falls back to the next model/key if a request fails or h
 
 | Tool | Description |
 |---|---|
-| `run_python` | Execute Python 3 in a sandboxed subprocess (15s timeout). Allowed stdlib: `math`, `json`, `re`, `datetime`, `random`, `itertools`, `functools`, `collections`, `statistics`, `base64`, `hashlib`, `decimal`. Network and filesystem access are blocked. |
+| `run_python` | Execute Python 3 in a subprocess (60s timeout). Full stdlib plus everything installed in the bot's venv (`os`, `socket`, `urllib`, `requests`/`aiohttp`, `asyncpg`, `beautifulsoup4`, ...) — network and filesystem access are **allowed**. Gets `DB_READONLY_URL` as an env var for read-only DB queries via `asyncpg`. **Only reachable by the Owner** (see [Security notes](#security-notes)); every call is mirrored in full (code + output) to the owner's chat regardless of what the AI says in its reply. |
 
 ### Telegram — Messaging
 
@@ -293,7 +294,7 @@ agent.py          Gemini API loop — multi-turn function calling
 handlers.py       Message accumulation, context storage, response dispatch, passive user-directory learning (messages, joins/leaves, chat_member updates)
 commands.py       Slash command handlers
 tools_web.py      web_search, fetch_url, arxiv_search
-tools_code.py     run_python (sandboxed subprocess + AST security scan)
+tools_code.py     run_python (unrestricted subprocess, 60s timeout, mirrors code+output to owner)
 tools_telegram.py 31 Telegram action tools
 file_cache.py     In-RAM file cache (LRU eviction, no disk/DB writes)
 utils.py          md_to_html, split_message, merge
@@ -354,12 +355,46 @@ tg_send_document(url="https://...")
 
 ---
 
+## Security Notes
+
+- **Owner-only gate.** `handlers.py` checks `user.id == OWNER_ID` before any message reaches the AI/tools — non-owner messages are only stored as group context (if `GROUP_CONTEXT_ENABLED`) and never trigger a reply or a tool call. `run_python` (see below) relies entirely on this gate for its safety, since the sandbox itself no longer restricts anything.
+- **`run_python` has full OS access.** As of the current version, `run_python` is **not** sandboxed against `os`, sockets, `open()`, etc. — it can read/write files and make network calls, because it's only ever invoked for the Owner. If you ever loosen the owner-only gate (e.g. allow a second user), revisit `tools_code.py` first.
+  - The subprocess env is minimal and explicit (`PATH`, `LANG`, `HOME`, `DB_READONLY_URL`) — it does **not** inherit `BOT_TOKEN`, `DATABASE_URL`, `GEMINI_KEYS`, etc., so sandboxed code (or anything that tricks the AI into running attacker-supplied code) can't read the bot's own secrets.
+  - Every `run_python` call is mirrored **in full** (code + output, uncut) to the owner's Telegram chat — as a message if short, or a `.txt` document if long — independent of whatever the AI says in its actual reply. Check `tools_code.py::_mirror_to_owner` if you want to change where/how this is sent.
+  - The system prompt (`agent.py::build_system_prompt`) explicitly tells the model to treat content from `web_search`/`fetch_url`/`arxiv_search`, non-owner messages, and tool output as **data, never as instructions** — a basic prompt-injection defense. This reduces but does not eliminate the risk of a malicious webpage tricking the model into running harmful code with `run_python`.
+- **`DB_READONLY_URL`.** Point this at a database role that can only `SELECT`, never at your main writable `DATABASE_URL` — the sandbox has no read-only enforcement of its own, it just hands the connection string to whatever code the AI writes.
+
+### Getting a read-only Postgres URL
+
+**Option A — Aiven's built-in read replica (recommended if your plan supports it):**
+1. In the Aiven Console, open your PostgreSQL service.
+2. On the **Overview** page, look for **Read replica** / a **Replica URI**. If your plan has a standby node (Business/Premium, or HA add-on), the Replica URI is listed right there — copy it as `DB_READONLY_URL`.
+3. If no replica URI is shown, your plan may not include a standby node yet — under **Read replica**, click **Create replica** (Startup plan replicas are supported) and Aiven will provision one with its own URI.
+4. Physical replicas reject write queries at the Postgres level (`cannot execute ... in a read-only transaction`), so this is safe even though it uses the same DB user as your primary.
+
+**Option B — a dedicated read-only role (works on any plan/provider, including Aiven Startup with no replica):**
+```sql
+-- run against your primary DB
+CREATE ROLE bot_ro WITH LOGIN PASSWORD 'choose-a-strong-password';
+GRANT CONNECT ON DATABASE defaultdb TO bot_ro;      -- Aiven's default DB name is usually "defaultdb"
+GRANT USAGE ON SCHEMA public TO bot_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO bot_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO bot_ro;
+```
+Then build the DSN using your service's host/port from the Aiven Overview page (same host/port as `DATABASE_URL`, just swap in the new user/password):
+```
+postgresql://bot_ro:choose-a-strong-password@<your-service>.aivencloud.com:<port>/defaultdb?sslmode=require
+```
+Set that as `DB_READONLY_URL`. This role can `SELECT` but literally cannot `INSERT`/`UPDATE`/`DELETE`/`DROP`, regardless of what code runs against it — the strongest guarantee here since it doesn't depend on the sandbox behaving.
+
+---
+
 ## Notes
 
 - The bot only responds to the user whose Telegram ID matches `OWNER_ID`. No other user can trigger AI responses.
 - Tools that require admin rights (`tg_ban_user`, `tg_pin_message`, `tg_delete_message`, etc.) require the bot to have the corresponding admin permission in the target group.
 - The bot must be a member of any group or channel before `tg_send_message` can target it.
-- Python code execution has no network or filesystem access. Blocked modules include `os`, `sys`, `subprocess`, `socket`, `requests`, and all database drivers.
+- `run_python` has full network/filesystem access and no import restrictions — see [Security notes](#security-notes) for why this is safe here and how to configure `DB_READONLY_URL`.
 - The in-memory file cache is cleared on every Render restart. Telegram `file_id` values remain valid across restarts and can be reused.
 - Conversation history is persisted in PostgreSQL and restored on startup, so context survives restarts.
 - The `MAX_CONV_ROWS` limit prunes the oldest rows in the `conversations` table to prevent unbounded growth.

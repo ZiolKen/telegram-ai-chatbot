@@ -12,6 +12,11 @@ WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
 DATABASE_URL: str  = os.getenv("DATABASE_URL", "")
 MAX_CONV_ROWS: int = int(os.getenv("MAX_CONV_ROWS", "10000"))
 
+# Read-only DSN exposed to the run_python sandbox so the AI can query the DB
+# directly (e.g. via asyncpg) without ever seeing/using the writable DATABASE_URL.
+# Point this at a Postgres role that only has SELECT grants.
+DB_READONLY_URL: str = os.getenv("DB_READONLY_URL", "")
+
 # ── Gemini ────────────────────────────────────────────────────────────────
 GEMINI_KEYS: list[str] = [
     k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()
