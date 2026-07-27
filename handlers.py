@@ -78,16 +78,18 @@ def _fq_get(key: str, idx: int) -> str | None:
 # Model label map
 # ─────────────────────────────────────────────────────────────
 _MODEL_LABELS: dict[str, str] = {
-    "gemini-3.1-flash-lite":               "3.1 Flash Lite ⚡ (mặc định)",
+    "gemini-3.6-flash":               "3.6 Flash 🔰",
+    "gemini-3.5-flash-lite":               "3.5 Flash Lite 💠 (mặc định)",
+    "gemini-3.1-flash-lite":               "3.1 Flash Lite ⚡",
     "gemini-3.5-flash":                    "3.5 Flash 🌟",
-    "gemini-3-flash-preview":              "3 Flash Preview 🔭",
+    "gemini-3-flash-preview":              "3 Flash Preview 💥",
     "gemini-2.5-flash":                    "2.5 Flash 🚀",
     "gemini-2.5-flash-lite-preview-06-17": "2.5 Flash Lite 🪶",
-    "gemini-2.0-flash":                    "2.0 Flash 💨",
-    "gemini-2.0-flash-lite":               "2.0 Flash Lite 💤",
+    "gemini-2.0-flash":                    "2.0 Flash 💫",
+    "gemini-2.0-flash-lite":               "2.0 Flash Lite 🌀",
     "gemini-1.5-pro":                      "1.5 Pro 🧠",
     "gemini-1.5-flash":                    "1.5 Flash ✨",
-    "gemini-1.5-flash-8b":                 "1.5 Flash 8B 🌩️",
+    "gemini-1.5-flash-8b":                 "1.5 Flash 8B ❄️",
 }
 
 

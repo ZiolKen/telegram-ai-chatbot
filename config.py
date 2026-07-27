@@ -21,8 +21,10 @@ DB_READONLY_URL: str = os.getenv("DB_READONLY_URL", "")
 GEMINI_KEYS: list[str] = [
     k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()
 ]
-DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.1-flash-lite")
+DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.5-flash-lite")
 MODELS: list[str] = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
     "gemini-3.1-flash-lite",
     "gemini-3-flash-preview",
