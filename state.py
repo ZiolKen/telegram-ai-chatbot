@@ -4,6 +4,7 @@ state.py — In-memory state with async PostgreSQL persistence.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -182,6 +183,26 @@ def lookup_user_id(handle: str) -> Optional[int]:
 
 def get_known_user(user_id: int) -> Optional[dict]:
     return _user_directory.get(user_id)
+
+
+def search_similar_usernames(handle: str, limit: int = 5) -> list[str]:
+    """Fuzzy-suggest known usernames close to `handle` (typo tolerance).
+    Used to give a helpful hint when exact @username resolution fails."""
+    h = handle.strip().lstrip("@").lower()
+    if not h or not _username_to_id:
+        return []
+    known = list(_username_to_id.keys())
+    # 1) prefix matches first (most likely what the user meant)
+    prefix = [u for u in known if u.startswith(h)]
+    # 2) fuzzy matches on the rest
+    rest = [u for u in known if u not in prefix]
+    fuzzy = difflib.get_close_matches(h, rest, n=limit, cutoff=0.6)
+    ordered = prefix + fuzzy
+    return ordered[:limit]
+
+
+def known_user_count() -> int:
+    return len(_user_directory)
 
 
 # ── Startup loader ────────────────────────────────────────────────────────────

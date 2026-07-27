@@ -811,20 +811,15 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Web search engine diagnostics ───────────────────────────
     se = get_search_engine_status()
-    if se["google_configured"]:
+    if se["tavily_configured"]:
         if se["ok"] is True:
-            se_line = f"🔍 Search   : ✅ Google CSE (last: {_html_escape(se['detail'][:60])})"
+            se_line = f"🔍 Search   : ✅ Tavily (last: {_html_escape(se['detail'][:60])})"
         elif se["ok"] is False:
-            se_line = f"🔍 Search   : ⚠️ Google CSE lỗi, đang fallback DDG (last: {_html_escape(se['detail'][:80])})"
+            se_line = f"🔍 Search   : ⚠️ Tavily lỗi, đang fallback DDG (last: {_html_escape(se['detail'][:80])})"
         else:
-            se_line = "🔍 Search   : ✅ Google CSE đã cấu hình (chưa có lần gọi nào)"
+            se_line = "🔍 Search   : ✅ Tavily đã cấu hình (chưa có lần gọi nào)"
     else:
-        missing = []
-        if not se["google_api_key_set"]:
-            missing.append("GOOGLE_API_KEY")
-        if not se["google_cse_id_set"]:
-            missing.append("GOOGLE_CSE_ID")
-        se_line = f"🔍 Search   : ⚠️ DuckDuckGo only — thiếu env: {', '.join(missing)}"
+        se_line = "🔍 Search   : ⚠️ DuckDuckGo only — thiếu env: TAVILY_API_KEY"
 
     await _reply(update,
         f"{t('status.title', lang)}\n\n"

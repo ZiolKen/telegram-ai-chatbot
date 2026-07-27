@@ -31,8 +31,9 @@ MODELS: list[str] = [
 ]
 
 # ── Search (optional) ─────────────────────────────────────────────────────
-GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
-GOOGLE_CSE_ID: str  = os.getenv("GOOGLE_CSE_ID", "")
+# Tavily (https://tavily.com) — search engine ưu tiên cho web_search().
+# Fallback vẫn là DuckDuckGo nếu không set hoặc Tavily lỗi.
+TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
 # ── Features ─────────────────────────────────────────────────────────────
 ENABLE_PLUGINS: bool  = os.getenv("ENABLE_PLUGINS",  "true").lower() == "true"

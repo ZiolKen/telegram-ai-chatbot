@@ -25,6 +25,7 @@ from telegram.ext import (
     AIORateLimiter,
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -49,7 +50,7 @@ from commands import (
     cmd_warn, cmd_warns, cmd_resetwarns,
     cmd_feed, cmd_cancel,
 )
-from handlers import handle_callback, handle_message
+from handlers import handle_callback, handle_chat_member_update, handle_message
 
 logging.basicConfig(
     format  = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -111,6 +112,9 @@ def _register_handlers(app: Application) -> None:
         handle_message,
     ))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    # Học username↔user_id kể cả thành viên chưa từng nhắn tin (yêu cầu
+    # bot phải là admin của chat để nhận được update loại "chat_member").
+    app.add_handler(ChatMemberHandler(handle_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

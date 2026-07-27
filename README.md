@@ -10,13 +10,14 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | Category | Details |
 |---|---|
 | **AI** | Gemini 3.x / 2.x models, multi-key rotation, multi-model fallback, multi-turn function calling (up to 12 rounds/message) |
-| **Web** | DuckDuckGo & Google search, full-page URL fetch, ArXiv paper search |
+| **Web** | Tavily (primary) & DuckDuckGo (fallback) search, full-page URL fetch, ArXiv paper search |
 | **Code** | Safe Python sandbox — subprocess with 15s timeout, AST security scan, no network/filesystem access |
 | **Messaging** | Send text, photos, stickers, GIFs, polls, dice to any chat or channel |
 | **Files** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 256 MB |
 | **Moderation** | Ban, unban, mute, unmute users; warn system with auto-ban at 3 warnings (default); `/feed` buffer (last 100 messages) with inline action buttons — the **Reply** button sends a ForceReply prompt so you can type a response that gets forwarded to the original group message without leaving your private chat |
 | **Admin** | Promote/demote admins (with granular permission flags + custom title), pin/unpin messages, delete messages, forward, copy |
 | **Chat mgmt** | Set title/description, get chat/user info, member count, create invite links, invite/remove users, leave chats, send media albums |
+| **User resolution** | Resolves `@username`, `t.me/username`, and `tg://user?id=...` to a numeric Telegram user ID for moderation actions. Passively learns every user seen (messages, mentions, replies, joins/leaves, pins) plus the current chat's admin list, persisted to PostgreSQL — no `get_chat()` limitation for regular group members. Typo-tolerant suggestions when a username isn't found. |
 | **Edit messages** | Edit bot's own text *and* media messages — auto-detects text vs caption |
 | **Group context** | Reads and stores **all** messages from everyone in a group; AI always has full conversation context |
 | **Topic isolation** | Per-topic history and config in Supergroups with Topics |
@@ -63,8 +64,7 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | `ENABLE_FOLLOWUP` | `true` | Generate follow-up question buttons after responses |
 | `FOLLOWUP_COUNT` | `3` | Number of follow-up questions to generate |
 | `MESSAGE_MERGE_DELAY` | `1.5` | Seconds to wait before processing, to merge rapid consecutive messages |
-| `GOOGLE_API_KEY` | `""` | Google Custom Search API key (optional, enhances web search) |
-| `GOOGLE_CSE_ID` | `""` | Google Custom Search Engine ID |
+| `TAVILY_API_KEY` | `""` | Tavily API key (optional, primary web_search engine; falls back to DuckDuckGo if unset). Uses `search_depth=advanced` (2 credits/call, deeper & more relevant snippets) — free tier gives 1,000 credits/month = ~500 searches |
 
 ---
 
@@ -182,7 +182,7 @@ The agent automatically falls back to the next model/key if a request fails or h
 
 | Tool | Description |
 |---|---|
-| `web_search` | Search the web via DuckDuckGo (default) or Google |
+| `web_search` | Search the web via Tavily (default, if configured) or DuckDuckGo (fallback) |
 | `fetch_url` | Fetch and extract readable text from any URL |
 | `arxiv_search` | Search ArXiv for scientific papers |
 
@@ -225,6 +225,7 @@ The agent automatically falls back to the next model/key if a request fails or h
 | `tg_unban_user` | Unban a user |
 | `tg_mute_user` | Restrict a user from sending messages for `duration_minutes` (0 = permanent) |
 | `tg_unmute_user` | Restore full messaging rights |
+| `tg_resolve_user` | Resolve `@username` / `t.me/username` / `tg://user?id=...` to a numeric user ID before acting on it (or to get a clear error + suggestions if the bot doesn't know that user) |
 
 ### Telegram — Admin & Chat Management
 
@@ -289,7 +290,7 @@ config.py         All configuration from environment variables
 state.py          In-memory state with fire-and-forget PostgreSQL writes
 i18n.py           Bilingual (en/vi) UI string tables
 agent.py          Gemini API loop — multi-turn function calling
-handlers.py       Message accumulation, context storage, response dispatch
+handlers.py       Message accumulation, context storage, response dispatch, passive user-directory learning (messages, joins/leaves, chat_member updates)
 commands.py       Slash command handlers
 tools_web.py      web_search, fetch_url, arxiv_search
 tools_code.py     run_python (sandboxed subprocess + AST security scan)

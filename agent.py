@@ -319,7 +319,7 @@ def build_system_prompt(tg_ctx: TelegramContext, lang: str = DEFAULT_LANG) -> st
         ).format(chat_id=tg_ctx.chat_id)
 
     tools_section = """═══ AVAILABLE TOOLS / CÔNG CỤ CÓ SẴN ═══
-🌐 web_search        — Web search (DuckDuckGo / Google)
+🌐 web_search        — Web search (Tavily / DuckDuckGo)
 🔗 fetch_url         — Read webpage / article content
 📚 arxiv_search      — Search scientific papers
 💻 run_python        — Run Python code (math, data processing, etc.)

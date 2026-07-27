@@ -2,12 +2,13 @@
 tools_web.py — Web search, URL fetch, ArXiv.
 
 Engine priority for web_search():
-  1. Google CSE  (if GOOGLE_API_KEY + GOOGLE_CSE_ID set)
+  1. Tavily      (if TAVILY_API_KEY set) — AI-oriented search, trả kết quả
+                 đã được rerank + (tuỳ chọn) một câu trả lời tổng hợp nhanh.
   2. DuckDuckGo  (fallback, with retry + jitter)
 
 The `engine` parameter has been removed from the tool declaration:
   • AI was sometimes passing engine="duckduckgo" from the enum, bypassing
-    Google CSE even when configured.
+    the primary engine even when configured.
   • Engine selection is now fully automatic and internal.
 """
 from __future__ import annotations
@@ -23,7 +24,7 @@ from urllib.parse import urlparse
 import aiohttp
 from bs4 import BeautifulSoup
 
-from config import GOOGLE_API_KEY, GOOGLE_CSE_ID
+from config import TAVILY_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +34,15 @@ def datetime_now_iso() -> str:
 
 
 # Evaluated once at startup — logged so misconfiguration is visible.
-_GOOGLE_READY = bool(GOOGLE_API_KEY and GOOGLE_CSE_ID)
-if _GOOGLE_READY:
-    logger.info("[web] Google CSE ready (key=%.8s… cx=%.8s…)",
-                GOOGLE_API_KEY, GOOGLE_CSE_ID)
+_TAVILY_READY = bool(TAVILY_API_KEY)
+if _TAVILY_READY:
+    logger.info("[web] Tavily ready (key=%.8s…)", TAVILY_API_KEY)
 else:
-    logger.info("[web] Google CSE not configured — will use DuckDuckGo")
+    logger.info("[web] Tavily not configured (TAVILY_API_KEY) — will use DuckDuckGo")
 
 # Diagnostics — surfaced via /status so misconfiguration is visible without
-# having to dig through Render logs. Updated on every _google() call.
-_last_google_result: dict = {
+# having to dig through Render logs. Updated on every _tavily() call.
+_last_tavily_result: dict = {
     "ok": None,          # True / False / None (never called)
     "detail": "",        # human-readable outcome of the most recent call
     "at": None,          # datetime of the most recent attempt
@@ -51,12 +51,11 @@ _last_google_result: dict = {
 
 def get_search_engine_status() -> dict:
     """Snapshot of web-search engine configuration + last-call diagnostics,
-    used by /status to help diagnose why CSE might not be in use."""
+    used by /status to help diagnose why Tavily might not be in use."""
     return {
-        "google_configured": _GOOGLE_READY,
-        "google_api_key_set": bool(GOOGLE_API_KEY),
-        "google_cse_id_set": bool(GOOGLE_CSE_ID),
-        **_last_google_result,
+        "tavily_configured": _TAVILY_READY,
+        "tavily_api_key_set": bool(TAVILY_API_KEY),
+        **_last_tavily_result,
     }
 
 
@@ -79,7 +78,7 @@ WEB_TOOL_DECLS = [
             },
             "required": ["query"],
             # engine parameter intentionally removed — AI was overriding
-            # auto-selection and bypassing Google CSE.
+            # auto-selection and bypassing the primary engine.
         },
     },
     {
@@ -165,85 +164,90 @@ async def web_search(query: str, engine: str = "auto") -> str:
     """
     Engine selection (fully automatic — `engine` arg kept for internal use
     but is no longer exposed in the tool declaration):
-      1. Google CSE if configured.
+      1. Tavily if configured.
       2. DuckDuckGo with retry+jitter as fallback.
     """
-    if _GOOGLE_READY and engine != "duckduckgo":
+    if _TAVILY_READY and engine != "duckduckgo":
         try:
-            result = await _google(query)
+            result = await _tavily(query)
             if result is not None:
-                logger.debug("[web] Google CSE OK for: %s", query[:60])
+                logger.debug("[web] Tavily OK for: %s", query[:60])
                 return result
-            logger.warning("[web] Google CSE returned no result, falling back to DDG")
+            logger.warning("[web] Tavily returned no result, falling back to DDG")
         except Exception as e:
-            logger.warning("[web] Google CSE error (%s), falling back to DDG", e)
+            logger.warning("[web] Tavily error (%s), falling back to DDG", e)
 
     return await _ddg(query)
 
 
-# ── Google CSE ────────────────────────────────────────────────────────────
-async def _google(query: str) -> str | None:
+# ── Tavily ────────────────────────────────────────────────────────────────
+async def _tavily(query: str) -> str | None:
     """
     Returns formatted result string, or None on any failure
     (caller will fall back to DDG).
+
+    Docs: https://docs.tavily.com/documentation/api-reference/endpoint/search
     """
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "key": GOOGLE_API_KEY,
-        "cx":  GOOGLE_CSE_ID,
-        "q":   query,
-        "num": 8,
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key":              TAVILY_API_KEY,
+        "query":                query,
+        "search_depth":         "advanced",  # 2 credits/call — sâu hơn, snippet liên quan hơn
+        "max_results":          8,
+        "include_answer":       True,   # short synthesized answer, if any
+        "include_raw_content":  False,
     }
 
     def _record(ok: bool, detail: str) -> None:
-        _last_google_result["ok"]     = ok
-        _last_google_result["detail"] = detail
-        _last_google_result["at"]     = datetime_now_iso()
+        _last_tavily_result["ok"]     = ok
+        _last_tavily_result["detail"] = detail
+        _last_tavily_result["at"]     = datetime_now_iso()
 
     try:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=15)
         ) as s:
-            async with s.get(url, params=params) as r:
+            async with s.post(url, json=payload) as r:
                 if r.status != 200:
                     # Log the actual response body — the real reason (invalid
-                    # key, CSE ID not configured for whole-web search, API
-                    # not enabled on the GCP project, etc.) is almost always
+                    # key, over quota, bad request, etc.) is almost always
                     # in here, not just the status code.
                     body = (await r.text())[:500]
                     if r.status == 429:
-                        logger.warning("[web] Google CSE rate-limited (429): %s", body)
+                        logger.warning("[web] Tavily rate-limited (429): %s", body)
                         _record(False, f"HTTP 429 (rate-limited): {body}")
-                    elif r.status == 403:
-                        logger.error("[web] Google CSE 403 — check API key / CSE ID: %s", body)
-                        _record(False, f"HTTP 403 (key/CSE ID/billing issue): {body}")
+                    elif r.status in (401, 403):
+                        logger.error("[web] Tavily %d — check TAVILY_API_KEY: %s", r.status, body)
+                        _record(False, f"HTTP {r.status} (invalid key/quota): {body}")
                     else:
-                        logger.error("[web] Google CSE HTTP %d: %s", r.status, body)
+                        logger.error("[web] Tavily HTTP %d: %s", r.status, body)
                         _record(False, f"HTTP {r.status}: {body}")
                     return None
                 data = await r.json()
 
-        items = data.get("items", [])
-        if not items:
-            # Return empty-string sentinel so caller knows Google worked
-            # but found nothing (no need to fall back to DDG). This usually
-            # means the CSE isn't configured to "Search the entire web".
-            _record(True, "200 OK but 0 items — check CSE 'Search the entire web' setting")
+        results = data.get("results", [])
+        if not results:
+            _record(True, "200 OK but 0 results")
             return "Không tìm thấy kết quả nào."
 
-        lines = [
-            f"**{i.get('title', '')}**\n{i.get('link', '')}\n{i.get('snippet', '')}"
-            for i in items
-        ]
-        _record(True, f"200 OK — {len(items)} items")
+        lines = []
+        answer = (data.get("answer") or "").strip()
+        if answer:
+            lines.append(f"💡 {answer}")
+
+        lines.extend(
+            f"**{r.get('title', '')}**\n{r.get('url', '')}\n{(r.get('content') or '')[:400]}"
+            for r in results
+        )
+        _record(True, f"200 OK — {len(results)} results")
         return "\n\n".join(lines)
 
     except asyncio.TimeoutError:
-        logger.warning("[web] Google CSE timeout")
+        logger.warning("[web] Tavily timeout")
         _record(False, "Timeout after 15s")
         return None
     except Exception as e:
-        logger.error("[web] Google CSE unexpected error: %s", e)
+        logger.error("[web] Tavily unexpected error: %s", e)
         _record(False, f"Exception: {e}")
         return None
 
@@ -330,8 +334,8 @@ async def _ddg(query: str) -> str:
     logger.error("[web] DDG failed after 3 attempts. Last error: %s", last_err)
     return (
         "⚠️ DuckDuckGo đang rate-limit sau 3 lần thử.\n"
-        "Thử lại sau vài phút, hoặc cấu hình GOOGLE_API_KEY + GOOGLE_CSE_ID "
-        "để dùng Google Search thay thế."
+        "Thử lại sau vài phút, hoặc cấu hình TAVILY_API_KEY "
+        "để dùng Tavily thay thế."
     )
 
 

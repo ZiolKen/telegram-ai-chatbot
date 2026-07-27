@@ -379,6 +379,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             state.remember_user(eu.id, eu.username, eu.full_name or "")
     for nm in (msg.new_chat_members or []):
         state.remember_user(nm.id, nm.username, nm.full_name or "")
+    if msg.left_chat_member:
+        lm = msg.left_chat_member
+        state.remember_user(lm.id, lm.username, lm.full_name or "")
+    if msg.pinned_message and msg.pinned_message.from_user:
+        pu = msg.pinned_message.from_user
+        state.remember_user(pu.id, pu.username, pu.full_name or "")
 
     bot_username = context.bot.username
     is_private   = chat.type == ChatType.PRIVATE
@@ -501,6 +507,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     )
     state.pending_tasks[accu_key] = task
+
+
+# ─────────────────────────────────────────────────────────────
+# Chat-member handler — học user "im lặng"
+# ─────────────────────────────────────────────────────────────
+# Telegram gửi update kiểu "chat_member" mỗi khi status của 1 thành viên
+# đổi (join / leave / kick / promote / restrict...), kể cả khi người đó
+# CHƯA từng gửi tin nhắn nào (nên handle_message không thấy được).
+# Đây là nguồn học username→user_id "miễn phí" giúp @username resolve
+# được ngay cả với thành viên lurker hoặc admin mới add — không cần họ
+# phải chat trước. Yêu cầu: bot phải là admin trong chat để nhận update này.
+async def handle_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cmu = update.chat_member
+    if not cmu:
+        return
+    u = cmu.new_chat_member.user
+    state.remember_user(u.id, u.username, u.full_name or "")
+    # Người mời/kick/promote cũng là 1 user thật, tiện thể học luôn.
+    actor = cmu.from_user
+    if actor:
+        state.remember_user(actor.id, actor.username, actor.full_name or "")
 
 
 # ─────────────────────────────────────────────────────────────

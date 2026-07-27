@@ -6,6 +6,7 @@ and the current chat/message context as defaults.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -47,17 +48,40 @@ def _resolve_chat(ctx: TelegramContext, chat_id_arg: Any) -> int | str:
     return ctx.chat_id
 
 
+_TME_RE = re.compile(r"(?:https?://)?t\.me/(\w{5,})", re.IGNORECASE)
+_TG_USER_LINK_RE = re.compile(r"tg://user\?id=(\d+)", re.IGNORECASE)
+
+
+def _extract_handle_or_id(raw: str) -> tuple[Optional[int], Optional[str]]:
+    """Parse deep-link forms into (numeric_id, username_handle).
+    Exactly one of the two is set, or both None if `raw` matched nothing
+    special (caller should treat it as a plain @username/username)."""
+    m = _TG_USER_LINK_RE.search(raw)
+    if m:
+        return int(m.group(1)), None
+    m = _TME_RE.search(raw)
+    if m:
+        return None, m.group(1)
+    return None, None
+
+
 async def _resolve_user(ctx: TelegramContext, user_id_or_username: Any) -> Optional[int]:
     """
     Resolve a tool-provided user_id argument to a numeric Telegram user ID.
-
-    Accepts:
-      • a numeric ID (int, or numeric string) → returned as-is
-      • "@username" / "username" → looked up in the locally-learned user
-        directory first (works for any user the bot has seen a message
-        from — including regular group members, which Telegram's
-        get_chat() usually CANNOT resolve), then falls back to
-        ctx.bot.get_chat() for channels/bots/public entities.
+    Tries, in order:
+      1. Numeric ID (int, numeric string, or "tg://user?id=NNN" deep link)
+         → returned as-is.
+      2. "@username" / "username" / "t.me/username" link → looked up in the
+         locally-learned user directory (works for anyone the bot has ever
+         seen a message, mention, join/leave event, or admin-list entry
+         from — which covers ordinary group members that Telegram's own
+         get_chat() usually CANNOT resolve).
+      3. ctx.bot.get_chat("@username") — works for channels/bots/users who
+         already have a chat with the bot.
+      4. Live admin-list scan of the current chat (get_chat_administrators)
+         — catches admins/owners the bot hasn't directly seen chat from yet.
+         Every admin found this way is also cached into the directory, so
+         subsequent lookups (for any of them) become instant.
 
     Returns None if resolution fails.
     """
@@ -67,7 +91,13 @@ async def _resolve_user(ctx: TelegramContext, user_id_or_username: Any) -> Optio
     if raw.lstrip("-").isdigit():
         return int(raw)
 
-    handle = raw.lstrip("@")
+    deep_id, deep_handle = _extract_handle_or_id(raw)
+    if deep_id is not None:
+        return deep_id
+    handle = (deep_handle or raw.lstrip("@")).strip()
+    if not handle:
+        return None
+
     known_id = state.lookup_user_id(handle)
     if known_id:
         return known_id
@@ -79,14 +109,40 @@ async def _resolve_user(ctx: TelegramContext, user_id_or_username: Any) -> Optio
     except Exception as e:
         logger.debug("[tg] get_chat fallback failed for @%s: %s", handle, e)
 
+    # Last resort: scan the current chat's admin list. This resolves admins
+    # the bot has never received a message from (common when adding the bot
+    # to an already-established group) and warms the cache for everyone
+    # found so future lookups — including for OTHER admins — are instant.
+    try:
+        admins = await ctx.bot.get_chat_administrators(ctx.chat_id)
+        target_lc = handle.lower()
+        found: Optional[int] = None
+        for m in admins:
+            au = m.user
+            state.remember_user(au.id, au.username, au.full_name or "")
+            if au.username and au.username.lower() == target_lc:
+                found = au.id
+        if found is not None:
+            return found
+    except Exception as e:
+        logger.debug("[tg] admin-list fallback failed for @%s: %s", handle, e)
+
     return None
 
 
 def _user_not_found_msg(raw: Any) -> str:
+    handle = str(raw).strip().lstrip("@")
+    suggestions = state.search_similar_usernames(handle)
+    hint = (
+        f" Ý bạn có phải: {', '.join('@' + s for s in suggestions)}?"
+        if suggestions else ""
+    )
     return (
-        f"❌ Không tìm được user_id cho '{raw}'. Bot chỉ tự resolve được "
-        f"@username nếu đã từng thấy tin nhắn của người đó trong nhóm. "
-        f"Hãy reply vào tin nhắn của họ, hoặc cung cấp user ID dạng số."
+        f"❌ Không tìm được user_id cho '{raw}'.{hint} Bot tự resolve được "
+        f"@username nếu đã từng thấy tin nhắn/mention/join-leave của người đó, "
+        f"hoặc nếu họ là admin của chat hiện tại. "
+        f"Nếu vẫn không được: hãy reply vào tin nhắn của họ, hoặc cung cấp "
+        f"user ID dạng số (hoặc link tg://user?id=...)."
     )
 
 
@@ -1177,15 +1233,17 @@ TG_TOOL_DECLS.extend([
     {
         "name": "tg_resolve_user",
         "description": (
-            "Tra numeric Telegram user ID từ @username. Dùng khi cần xác nhận "
-            "user_id trước khi ban/mute/warn/promote/... hoặc khi muốn báo lỗi "
-            "rõ ràng nếu bot chưa từng thấy user đó (thay vì để hành động thất bại). "
-            "Chỉ resolve được nếu bot đã từng thấy tin nhắn/mention của user này trước đó."
+            "Tra numeric Telegram user ID từ @username (hoặc link t.me/username, "
+            "tg://user?id=...). Dùng khi cần xác nhận user_id trước khi "
+            "ban/mute/warn/promote/... hoặc khi muốn báo lỗi rõ ràng nếu bot "
+            "chưa từng thấy user đó (thay vì để hành động thất bại). "
+            "Resolve được nếu: bot đã từng thấy tin nhắn/mention/join-leave của "
+            "user này, HOẶC user đó hiện là admin của chat hiện tại."
         ),
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "username": {"type": "STRING", "description": "@username hoặc username (không cần @)"},
+                "username": {"type": "STRING", "description": "@username, username, hoặc link t.me/username / tg://user?id=..."},
             },
             "required": ["username"],
         },
