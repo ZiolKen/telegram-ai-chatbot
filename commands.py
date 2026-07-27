@@ -821,6 +821,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         se_line = "🔍 Search   : ⚠️ DuckDuckGo only — thiếu env: TAVILY_API_KEY"
 
+    # ── User directory (uid resolution) diagnostics ──────────────
+    kn = state.known_user_count()
+    persist_icon = "✅ DB" if db_info.get("ready") else "⚠️ RAM only (mất khi restart)"
+    uid_line = f"🗂 Users    : <b>{kn}</b> known ({persist_icon})"
+
     await _reply(update,
         f"{t('status.title', lang)}\n\n"
         f"{t('status.conv', lang)}   : <code>{cid}</code>\n"
@@ -829,6 +834,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{key_line}\n"
         f"{wh_line}\n"
         f"{se_line}\n"
+        f"{uid_line}\n"
         f"{t('status.plugins', lang)}: {plug_icon}\n"
         f"{t('status.followup', lang)}: {follow_icon}\n"
         f"{t('status.topic', lang)}: {topic_icon}\n"
