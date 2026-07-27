@@ -366,6 +366,25 @@ tg_send_document(url="https://...")
 
 ### Getting a read-only Postgres URL
 
+**Option C — automated, via Render's Build Command (no web console, no local psql):**
+
+The repo includes `setup_readonly_role.py`, an idempotent script (safe to re-run every deploy) that creates the role and grants over your existing `DATABASE_URL` using `asyncpg` (already a dependency) — no extra tools needed.
+
+1. In Render, add env vars **before** deploying:
+   - `BOT_RO_PASSWORD` — any password you choose (used once, then you can forget it).
+   - `BOT_RO_USER` — optional, defaults to `bot_ro`.
+2. Change the **Build Command** to:
+   ```
+   pip install -r requirements.txt && python setup_readonly_role.py
+   ```
+3. Deploy. Open the build logs and find the line:
+   ```
+   [setup_readonly_role] DB_READONLY_URL=postgresql://bot_ro:...@host:port/db?sslmode=require
+   ```
+4. Copy that whole value into a new env var `DB_READONLY_URL`, then trigger a redeploy so `main.py` picks it up.
+
+If `DATABASE_URL` or `BOT_RO_PASSWORD` isn't set, the script just logs a message and exits `0` — it never fails your build.
+
 **Option A — Aiven's built-in read replica (recommended if your plan supports it):**
 1. In the Aiven Console, open your PostgreSQL service.
 2. On the **Overview** page, look for **Read replica** / a **Replica URI**. If your plan has a standby node (Business/Premium, or HA add-on), the Replica URI is listed right there — copy it as `DB_READONLY_URL`.
