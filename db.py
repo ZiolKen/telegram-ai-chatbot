@@ -500,10 +500,10 @@ if __name__ == "__main__":
 
         # Lấy thống kê để xác nhận schema hoạt động
         s = await stats()
-        print(f"\n✅  Kết nối thành công!", flush=True)
+        print("\n✅  Kết nối thành công!", flush=True)
         print(f"    conversations : {s.get('conv_rows', 0):,} rows", flush=True)
         print(f"    bot_config    : {s.get('config_rows', 0):,} rows", flush=True)
-        print(f"    Schema        : OK (tables & indexes ready)", flush=True)
+        print("    Schema        : OK (tables & indexes ready)", flush=True)
         print("\n   → Tiếp tục khởi động main.py...\n", flush=True)
 
         await close()

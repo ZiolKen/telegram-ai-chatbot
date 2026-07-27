@@ -105,12 +105,21 @@ def _sandbox_env() -> dict:
 
 async def _mirror_to_owner(tg_ctx: "TelegramContext", code: str, output: str) -> None:
     """
-    Audit log: always send the FULL code + FULL output straight to the owner's
-    chat, independent of whatever the AI decides to say afterwards. This is
-    the source of truth — the model's chat reply may summarize/omit things,
-    this never does.
+    Audit log: always send the FULL code + FULL output straight to the
+    OWNER'S PRIVATE DM — independent of whatever chat/group the tool was
+    actually invoked from, and independent of whatever the AI decides to
+    say afterwards. This is the source of truth — the model's chat reply
+    may summarize/omit things, this never does.
+
+    Always targets config.OWNER_ID (a user's private-chat id == their user
+    id in Telegram), NOT tg_ctx.chat_id — otherwise this would leak the
+    full code + output into whatever group the command was run from.
     Never raises — a mirror failure must not break the actual tool result.
     """
+    if not config.OWNER_ID:
+        logger.warning("run_python mirror skipped: OWNER_ID not configured")
+        return
+
     ts   = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     body = f"🔎 run_python @ {ts}\n\n――― code ―――\n{code}\n\n――― output ―――\n{output}"
 
@@ -122,20 +131,18 @@ async def _mirror_to_owner(tg_ctx: "TelegramContext", code: str, output: str) ->
                 f"<b>― output ―</b>\n<pre><code>{_escape(output)}</code></pre>"
             )
             await tg_ctx.bot.send_message(
-                chat_id=tg_ctx.chat_id,
+                chat_id=config.OWNER_ID,
                 text=html,
                 parse_mode="HTML",
-                message_thread_id=tg_ctx.thread_id,
             )
         else:
             from telegram import InputFile
             buf = _io.BytesIO(body.encode("utf-8"))
             fname = f"run_python_{datetime.now(tz=timezone.utc).strftime('%Y%m%d_%H%M%S')}.txt"
             await tg_ctx.bot.send_document(
-                chat_id=tg_ctx.chat_id,
+                chat_id=config.OWNER_ID,
                 document=InputFile(buf, filename=fname),
                 caption=f"🔎 run_python @ {ts} (full code+output, too long for a message)",
-                message_thread_id=tg_ctx.thread_id,
             )
     except Exception as e:
         logger.error("run_python mirror failed: %s", e)

@@ -18,6 +18,7 @@ import time as _time
 from typing import Optional
 
 from telegram import (
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -26,7 +27,7 @@ from telegram import (
 from telegram.constants import ChatType
 from telegram.ext import ContextTypes
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import state
 from state import FeedEntry
 import utils
@@ -42,7 +43,7 @@ from config import (
     MODELS,
     OWNER_ID,
 )
-from tools_telegram import TelegramContext, TOOL_STATUS
+from tools_telegram import TelegramContext, TOOL_STATUS, tool_status_text
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,7 @@ def _fmt_size(size_bytes: Optional[int]) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def _make_tg_ctx(bot, chat_id, user_id, message_id, thread_id,
-                 chat_title, user_name) -> TelegramContext:
+                 chat_title, user_name, lang: str = "en") -> TelegramContext:
     return TelegramContext(
         bot        = bot,
         chat_id    = chat_id,
@@ -174,6 +175,7 @@ def _make_tg_ctx(bot, chat_id, user_id, message_id, thread_id,
         thread_id  = thread_id,
         chat_title = chat_title,
         user_name  = user_name,
+        lang       = lang,
     )
 
 
@@ -266,7 +268,7 @@ async def _process(
     custom_sys  = cfg.get("system_prompt")
 
     tg_ctx        = _make_tg_ctx(bot, chat_id, user_id, message_id,
-                                 thread_id, chat_title, user_name)
+                                 thread_id, chat_title, user_name, lang)
     system_prompt = custom_sys or build_system_prompt(tg_ctx, lang=lang)
     history       = state.get_history(cid)
 
@@ -281,7 +283,7 @@ async def _process(
         pass
 
     async def status_cb(tool_name: str):
-        label = TOOL_STATUS.get(tool_name, f"⚙️ {tool_name}…")
+        label = tool_status_text(tool_name, lang)
         if status_msg:
             try:
                 await status_msg.edit_text(label)
@@ -481,10 +483,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Thêm nội dung replied-to message làm prefix ───────────
     if msg.reply_to_message:
         rtext = (msg.reply_to_message.text or msg.reply_to_message.caption or "")[:500]
-        if rtext:
-            ruser = (msg.reply_to_message.from_user.full_name
-                     if msg.reply_to_message.from_user else "Unknown")
-            text = f'[Reply to {ruser}: "{rtext}"]\n{text}'
+        ru = msg.reply_to_message.from_user
+        if ru:
+            # Expose the replied-to user's numeric ID (and @username, if set)
+            # directly in the text the AI sees — this is what lets "ban/mute/
+            # warn this person" work when the caller only replies, without
+            # ever having to type an ID or @username themselves. Included
+            # even when the replied message has no text (photo/sticker/etc.)
+            # so the target is still resolvable.
+            who = f"{ru.full_name} (user_id={ru.id}" + (f", @{ru.username}" if ru.username else "") + ")"
+            snippet = f': "{rtext}"' if rtext else " (non-text message)"
+            text = f'[Reply to {who}{snippet}]\n{text}'
 
     # ── Bỏ @mention khỏi text ─────────────────────────────────
     text = text.replace(f"@{bot_username}", "").strip()
@@ -632,12 +641,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # callback_data format: "fd:{action}:{chat_id}:{msg_id_or_user_id}"
 # ─────────────────────────────────────────────────────────────
 async def _handle_feed_action(
-    query: "CallbackQuery",
+    query: CallbackQuery,
     context: ContextTypes.DEFAULT_TYPE,
     data: str,
     lang: str = "en",
 ) -> None:
-    from datetime import datetime, timedelta, timezone
     from telegram import ChatPermissions
 
     parts = data.split(":")

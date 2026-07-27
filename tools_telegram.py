@@ -20,6 +20,7 @@ from telegram import (
 )
 
 import state
+from i18n import DEFAULT_LANG, t
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class TelegramContext:
     thread_id: Optional[int] = None
     chat_title: str          = ""
     user_name: str           = ""
+    lang: str                = DEFAULT_LANG
 
 
 def _resolve_chat(ctx: TelegramContext, chat_id_arg: Any) -> int | str:
@@ -130,20 +132,15 @@ async def _resolve_user(ctx: TelegramContext, user_id_or_username: Any) -> Optio
     return None
 
 
-def _user_not_found_msg(raw: Any) -> str:
+def _user_not_found_msg(raw: Any, lang: str = DEFAULT_LANG) -> str:
     handle = str(raw).strip().lstrip("@")
     suggestions = state.search_similar_usernames(handle)
     hint = (
-        f" Ý bạn có phải: {', '.join('@' + s for s in suggestions)}?"
+        t("tools.user_not_found_hint", lang,
+          suggestions=", ".join("@" + s for s in suggestions))
         if suggestions else ""
     )
-    return (
-        f"❌ Không tìm được user_id cho '{raw}'.{hint} Bot tự resolve được "
-        f"@username nếu đã từng thấy tin nhắn/mention/join-leave của người đó, "
-        f"hoặc nếu họ là admin của chat hiện tại. "
-        f"Nếu vẫn không được: hãy reply vào tin nhắn của họ, hoặc cung cấp "
-        f"user ID dạng số (hoặc link tg://user?id=...)."
-    )
+    return t("tools.user_not_found", lang, raw=raw, hint=hint)
 
 
 
@@ -427,10 +424,10 @@ async def tg_send_message(ctx: TelegramContext, text: str, chat_id=None,
             message_thread_id   = thr,
             reply_to_message_id = int(reply_to_id) if reply_to_id else None,
         )
-        return f"✅ Đã gửi tin nhắn (ID {msg.message_id}) tới {target}."
+        return t("tools.sent_message", ctx.lang, mid=msg.message_id, target=target)
     except Exception as e:
         logger.error("tg_send_message: %s", e)
-        return f"❌ Gửi thất bại: {e}"
+        return t("tools.send_failed", ctx.lang, err=e)
 
 
 async def tg_react(ctx: TelegramContext, emoji: str, message_id=None,
@@ -444,10 +441,10 @@ async def tg_react(ctx: TelegramContext, emoji: str, message_id=None,
             reaction   = [ReactionTypeEmoji(emoji=emoji)],
             is_big     = bool(is_big),
         )
-        return f"✅ Đã react {emoji} vào tin nhắn {mid}."
+        return t("tools.reacted", ctx.lang, emoji=emoji, mid=mid)
     except Exception as e:
         logger.error("tg_react: %s", e)
-        return f"❌ React thất bại: {e}"
+        return t("tools.react_failed", ctx.lang, err=e)
 
 
 async def tg_delete_message(ctx: TelegramContext, message_id: int,
@@ -455,10 +452,10 @@ async def tg_delete_message(ctx: TelegramContext, message_id: int,
     target = _resolve_chat(ctx, chat_id)
     try:
         await ctx.bot.delete_message(chat_id=target, message_id=int(message_id))
-        return f"✅ Đã xóa tin nhắn {message_id}."
+        return t("tools.deleted_message", ctx.lang, mid=message_id)
     except Exception as e:
         logger.error("tg_delete_message: %s", e)
-        return f"❌ Xóa thất bại: {e}"
+        return t("tools.delete_failed", ctx.lang, err=e)
 
 
 async def tg_pin_message(ctx: TelegramContext, message_id: int,
@@ -470,10 +467,10 @@ async def tg_pin_message(ctx: TelegramContext, message_id: int,
             message_id           = int(message_id),
             disable_notification = bool(disable_notification),
         )
-        return f"✅ Đã ghim tin nhắn {message_id}."
+        return t("tools.pinned_message", ctx.lang, mid=message_id)
     except Exception as e:
         logger.error("tg_pin_message: %s", e)
-        return f"❌ Ghim thất bại: {e}"
+        return t("tools.pin_failed", ctx.lang, err=e)
 
 
 async def tg_unpin_message(ctx: TelegramContext, message_id=None,
@@ -483,13 +480,13 @@ async def tg_unpin_message(ctx: TelegramContext, message_id=None,
         if message_id:
             await ctx.bot.unpin_chat_message(chat_id=target,
                                              message_id=int(message_id))
-            return f"✅ Đã bỏ ghim tin nhắn {message_id}."
+            return t("tools.unpinned_message", ctx.lang, mid=message_id)
         else:
             await ctx.bot.unpin_all_chat_messages(chat_id=target)
-            return "✅ Đã bỏ ghim tất cả tin nhắn."
+            return t("tools.unpinned_all", ctx.lang)
     except Exception as e:
         logger.error("tg_unpin: %s", e)
-        return f"❌ Bỏ ghim thất bại: {e}"
+        return t("tools.unpin_failed", ctx.lang, err=e)
 
 
 async def tg_ban_user(ctx: TelegramContext, user_id: int,
@@ -497,16 +494,15 @@ async def tg_ban_user(ctx: TelegramContext, user_id: int,
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     try:
         await ctx.bot.ban_chat_member(chat_id=target, user_id=uid)
-        msg = f"✅ Đã ban user {uid}"
         if reason:
-            msg += f" (lý do: {reason})"
-        return msg + "."
+            return t("tools.banned_user_reason", ctx.lang, uid=uid, reason=reason)
+        return t("tools.banned_user", ctx.lang, uid=uid)
     except Exception as e:
         logger.error("tg_ban_user: %s", e)
-        return f"❌ Ban thất bại: {e}"
+        return t("tools.ban_failed", ctx.lang, err=e)
 
 
 async def tg_unban_user(ctx: TelegramContext, user_id: int,
@@ -514,15 +510,15 @@ async def tg_unban_user(ctx: TelegramContext, user_id: int,
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     try:
         await ctx.bot.unban_chat_member(
             chat_id=target, user_id=uid, only_if_banned=True
         )
-        return f"✅ Đã unban user {uid}."
+        return t("tools.unbanned_user", ctx.lang, uid=uid)
     except Exception as e:
         logger.error("tg_unban: %s", e)
-        return f"❌ Unban thất bại: {e}"
+        return t("tools.unban_failed", ctx.lang, err=e)
 
 
 async def tg_mute_user(ctx: TelegramContext, user_id: int,
@@ -530,7 +526,7 @@ async def tg_mute_user(ctx: TelegramContext, user_id: int,
     target  = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     perms   = ChatPermissions(can_send_messages=False)
     until   = None
     if duration_minutes and duration_minutes > 0:
@@ -542,11 +538,12 @@ async def tg_mute_user(ctx: TelegramContext, user_id: int,
             permissions= perms,
             until_date = until,
         )
-        dur = f"{duration_minutes} phút" if duration_minutes else "vĩnh viễn"
-        return f"✅ Đã mute user {uid} ({dur})."
+        dur = (t("tools.mute_minutes", ctx.lang, n=duration_minutes) if duration_minutes
+               else t("tools.mute_forever", ctx.lang))
+        return t("tools.muted_user", ctx.lang, uid=uid, dur=dur)
     except Exception as e:
         logger.error("tg_mute: %s", e)
-        return f"❌ Mute thất bại: {e}"
+        return t("tools.mute_failed", ctx.lang, err=e)
 
 
 async def tg_unmute_user(ctx: TelegramContext, user_id: int,
@@ -554,7 +551,7 @@ async def tg_unmute_user(ctx: TelegramContext, user_id: int,
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     perms  = ChatPermissions(
         can_send_messages        = True,
         can_send_polls           = True,
@@ -568,10 +565,10 @@ async def tg_unmute_user(ctx: TelegramContext, user_id: int,
         await ctx.bot.restrict_chat_member(
             chat_id=target, user_id=uid, permissions=perms
         )
-        return f"✅ Đã unmute user {uid}."
+        return t("tools.unmuted_user", ctx.lang, uid=uid)
     except Exception as e:
         logger.error("tg_unmute: %s", e)
-        return f"❌ Unmute thất bại: {e}"
+        return t("tools.unmute_failed", ctx.lang, err=e)
 
 
 async def tg_forward_message(ctx: TelegramContext, message_id: int,
@@ -584,10 +581,10 @@ async def tg_forward_message(ctx: TelegramContext, message_id: int,
             from_chat_id = src,
             message_id   = int(message_id),
         )
-        return f"✅ Đã forward tin nhắn {message_id} → {dest}."
+        return t("tools.forwarded_message", ctx.lang, mid=message_id, dest=dest)
     except Exception as e:
         logger.error("tg_forward: %s", e)
-        return f"❌ Forward thất bại: {e}"
+        return t("tools.forward_failed", ctx.lang, err=e)
 
 
 async def tg_copy_message(ctx: TelegramContext, message_id: int,
@@ -601,10 +598,10 @@ async def tg_copy_message(ctx: TelegramContext, message_id: int,
         if caption:
             kwargs["caption"] = caption
         await ctx.bot.copy_message(**kwargs)
-        return f"✅ Đã copy tin nhắn {message_id} → {dest}."
+        return t("tools.copied_message", ctx.lang, mid=message_id, dest=dest)
     except Exception as e:
         logger.error("tg_copy: %s", e)
-        return f"❌ Copy thất bại: {e}"
+        return t("tools.copy_failed", ctx.lang, err=e)
 
 
 async def tg_send_poll(ctx: TelegramContext, question: str,
@@ -614,7 +611,7 @@ async def tg_send_poll(ctx: TelegramContext, question: str,
     target = _resolve_chat(ctx, chat_id)
     opts   = [str(o) for o in options[:10]]
     if len(opts) < 2:
-        return "❌ Poll cần ít nhất 2 lựa chọn."
+        return t("tools.poll_needs_options", ctx.lang)
     try:
         msg = await ctx.bot.send_poll(
             chat_id                  = target,
@@ -624,10 +621,10 @@ async def tg_send_poll(ctx: TelegramContext, question: str,
             allows_multiple_answers  = bool(allows_multiple_answers),
             message_thread_id        = ctx.thread_id,
         )
-        return f"✅ Đã tạo poll (ID {msg.message_id}) với {len(opts)} lựa chọn."
+        return t("tools.poll_created", ctx.lang, mid=msg.message_id, n=len(opts))
     except Exception as e:
         logger.error("tg_send_poll: %s", e)
-        return f"❌ Tạo poll thất bại: {e}"
+        return t("tools.poll_failed", ctx.lang, err=e)
 
 
 async def tg_get_chat_info(ctx: TelegramContext, chat_id: str) -> str:
@@ -635,20 +632,20 @@ async def tg_get_chat_info(ctx: TelegramContext, chat_id: str) -> str:
     try:
         chat = await ctx.bot.get_chat(chat_id=target)
         lines = [
-            f"📛 Tên: {chat.effective_name}",
-            f"🆔 ID: {chat.id}",
-            f"📂 Loại: {chat.type}",
+            t("tools.chat_info_name", ctx.lang, name=chat.effective_name),
+            t("tools.chat_info_id", ctx.lang, id=chat.id),
+            t("tools.chat_info_type", ctx.lang, type=chat.type),
         ]
         if chat.username:
-            lines.append(f"🔗 Username: @{chat.username}")
+            lines.append(t("tools.chat_info_username", ctx.lang, username=chat.username))
         if chat.description:
-            lines.append(f"📄 Mô tả: {chat.description[:300]}")
+            lines.append(t("tools.chat_info_description", ctx.lang, desc=chat.description[:300]))
         if chat.invite_link:
-            lines.append(f"🔗 Invite: {chat.invite_link}")
+            lines.append(t("tools.chat_info_invite", ctx.lang, link=chat.invite_link))
         return "\n".join(lines)
     except Exception as e:
         logger.error("tg_get_chat_info: %s", e)
-        return f"❌ Lấy thông tin thất bại: {e}"
+        return t("tools.get_chat_info_failed", ctx.lang, err=e)
 
 
 async def tg_get_chat_members_count(ctx: TelegramContext,
@@ -656,9 +653,9 @@ async def tg_get_chat_members_count(ctx: TelegramContext,
     target = _resolve_chat(ctx, chat_id)
     try:
         count = await ctx.bot.get_chat_member_count(chat_id=target)
-        return f"👥 Chat {target} có {count:,} thành viên."
+        return t("tools.members_count", ctx.lang, target=target, count=count)
     except Exception as e:
-        return f"❌ Lấy số thành viên thất bại: {e}"
+        return t("tools.members_count_failed", ctx.lang, err=e)
 
 
 async def tg_send_dice(ctx: TelegramContext, emoji: str,
@@ -671,9 +668,9 @@ async def tg_send_dice(ctx: TelegramContext, emoji: str,
         msg = await ctx.bot.send_dice(
             chat_id=target, emoji=emoji, message_thread_id=ctx.thread_id
         )
-        return f"✅ Đã gửi {emoji} (kết quả: {msg.dice.value})."
+        return t("tools.dice_sent", ctx.lang, emoji=emoji, value=msg.dice.value)
     except Exception as e:
-        return f"❌ Gửi dice thất bại: {e}"
+        return t("tools.dice_failed", ctx.lang, err=e)
 
 
 async def tg_promote_admin(ctx: TelegramContext, user_id: int,
@@ -687,7 +684,7 @@ async def tg_promote_admin(ctx: TelegramContext, user_id: int,
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     try:
         await ctx.bot.promote_chat_member(
             chat_id               = target,
@@ -703,9 +700,9 @@ async def tg_promote_admin(ctx: TelegramContext, user_id: int,
             await ctx.bot.set_chat_administrator_custom_title(
                 chat_id=target, user_id=uid, custom_title=custom_title[:16]
             )
-        return f"✅ Đã promote user {uid} thành admin."
+        return t("tools.promoted_admin", ctx.lang, uid=uid)
     except Exception as e:
-        return f"❌ Promote thất bại: {e}"
+        return t("tools.promote_failed", ctx.lang, err=e)
 
 
 async def tg_demote_admin(ctx: TelegramContext, user_id: int,
@@ -713,7 +710,7 @@ async def tg_demote_admin(ctx: TelegramContext, user_id: int,
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     try:
         await ctx.bot.promote_chat_member(
             chat_id               = target,
@@ -727,9 +724,9 @@ async def tg_demote_admin(ctx: TelegramContext, user_id: int,
             can_invite_users      = False,
             can_pin_messages      = False,
         )
-        return f"✅ Đã demote user {uid} (xóa quyền admin)."
+        return t("tools.demoted_admin", ctx.lang, uid=uid)
     except Exception as e:
-        return f"❌ Demote thất bại: {e}"
+        return t("tools.demote_failed", ctx.lang, err=e)
 
 
 async def tg_set_chat_title(ctx: TelegramContext, title: str,
@@ -737,9 +734,9 @@ async def tg_set_chat_title(ctx: TelegramContext, title: str,
     target = _resolve_chat(ctx, chat_id)
     try:
         await ctx.bot.set_chat_title(chat_id=target, title=title[:255])
-        return f"✅ Đã đổi tên chat thành '{title}'."
+        return t("tools.title_changed", ctx.lang, title=title)
     except Exception as e:
-        return f"❌ Đổi tên thất bại: {e}"
+        return t("tools.title_failed", ctx.lang, err=e)
 
 
 async def tg_set_chat_description(ctx: TelegramContext, description: str,
@@ -747,9 +744,9 @@ async def tg_set_chat_description(ctx: TelegramContext, description: str,
     target = _resolve_chat(ctx, chat_id)
     try:
         await ctx.bot.set_chat_description(chat_id=target, description=description[:255])
-        return f"✅ Đã cập nhật mô tả chat."
+        return t("tools.description_updated", ctx.lang)
     except Exception as e:
-        return f"❌ Cập nhật mô tả thất bại: {e}"
+        return t("tools.description_failed", ctx.lang, err=e)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -779,30 +776,36 @@ TG_HANDLERS: dict[str, Any] = {
 
 # Status messages displayed while tools run
 TOOL_STATUS: dict[str, str] = {
-    "web_search":               "🌐 Đang tìm kiếm web…",
-    "fetch_url":                "🔗 Đang đọc trang web…",
-    "arxiv_search":             "📚 Đang tìm kiếm ArXiv…",
-    "run_python":               "💻 Đang chạy code Python…",
-    "tg_send_message":          "📤 Đang gửi tin nhắn…",
-    "tg_react":                 "😊 Đang thả reaction…",
-    "tg_delete_message":        "🗑️ Đang xóa tin nhắn…",
-    "tg_pin_message":           "📌 Đang ghim tin nhắn…",
-    "tg_unpin_message":         "📌 Đang bỏ ghim…",
-    "tg_ban_user":              "🚫 Đang ban user…",
-    "tg_unban_user":            "✅ Đang unban user…",
-    "tg_mute_user":             "🔇 Đang mute user…",
-    "tg_unmute_user":           "🔊 Đang unmute user…",
-    "tg_forward_message":       "↪️ Đang forward tin nhắn…",
-    "tg_copy_message":          "📋 Đang copy tin nhắn…",
-    "tg_send_poll":             "📊 Đang tạo poll…",
-    "tg_get_chat_info":         "ℹ️ Đang lấy thông tin chat…",
-    "tg_get_chat_members_count":"👥 Đang đếm thành viên…",
-    "tg_send_dice":             "🎲 Đang tung xúc xắc…",
-    "tg_promote_admin":         "👑 Đang promote admin…",
-    "tg_demote_admin":          "🔽 Đang demote admin…",
-    "tg_set_chat_title":        "✏️ Đang đổi tên chat…",
-    "tg_set_chat_description":  "📝 Đang cập nhật mô tả…",
+    "web_search":               "tool_status.web_search",
+    "fetch_url":                "tool_status.fetch_url",
+    "arxiv_search":             "tool_status.arxiv_search",
+    "run_python":               "tool_status.run_python",
+    "tg_send_message":          "tool_status.tg_send_message",
+    "tg_react":                 "tool_status.tg_react",
+    "tg_delete_message":        "tool_status.tg_delete_message",
+    "tg_pin_message":           "tool_status.tg_pin_message",
+    "tg_unpin_message":         "tool_status.tg_unpin_message",
+    "tg_ban_user":              "tool_status.tg_ban_user",
+    "tg_unban_user":            "tool_status.tg_unban_user",
+    "tg_mute_user":             "tool_status.tg_mute_user",
+    "tg_unmute_user":           "tool_status.tg_unmute_user",
+    "tg_forward_message":       "tool_status.tg_forward_message",
+    "tg_copy_message":          "tool_status.tg_copy_message",
+    "tg_send_poll":             "tool_status.tg_send_poll",
+    "tg_get_chat_info":         "tool_status.tg_get_chat_info",
+    "tg_get_chat_members_count":"tool_status.tg_get_chat_members_count",
+    "tg_send_dice":             "tool_status.tg_send_dice",
+    "tg_promote_admin":         "tool_status.tg_promote_admin",
+    "tg_demote_admin":          "tool_status.tg_demote_admin",
+    "tg_set_chat_title":        "tool_status.tg_set_chat_title",
+    "tg_set_chat_description":  "tool_status.tg_set_chat_description",
 }
+
+
+def tool_status_text(tool_name: str, lang: str = DEFAULT_LANG) -> str:
+    """Localized 'tool is running…' label, with a generic fallback."""
+    key = TOOL_STATUS.get(tool_name)
+    return t(key, lang) if key else f"⚙️ {tool_name}…"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -857,10 +860,10 @@ async def tg_send_photo(ctx: TelegramContext, photo: str,
             parse_mode        = "HTML" if caption else None,
             message_thread_id = thr,
         )
-        return f"✅ Đã gửi ảnh (ID {msg.message_id}) tới {target}."
+        return t("tools.photo_sent", ctx.lang, mid=msg.message_id, target=target)
     except Exception as e:
         logger.error("tg_send_photo: %s", e)
-        return f"❌ Gửi ảnh thất bại: {e}"
+        return t("tools.photo_failed", ctx.lang, err=e)
 
 
 async def tg_edit_message(ctx: TelegramContext, message_id: int,
@@ -875,17 +878,17 @@ async def tg_edit_message(ctx: TelegramContext, message_id: int,
             text       = text[:4096],
             parse_mode = pm,
         )
-        return f"✅ Đã sửa tin nhắn {message_id}."
+        return t("tools.message_edited", ctx.lang, mid=message_id)
     except Exception as e:
         logger.error("tg_edit_message: %s", e)
-        return f"❌ Sửa thất bại: {e}"
+        return t("tools.edit_failed", ctx.lang, err=e)
 
 
 # Register new handlers + status labels
 TG_HANDLERS["tg_send_photo"]    = tg_send_photo
 TG_HANDLERS["tg_edit_message"]  = tg_edit_message
-TOOL_STATUS["tg_send_photo"]    = "🖼️ Đang gửi ảnh…"
-TOOL_STATUS["tg_edit_message"]  = "✏️ Đang sửa tin nhắn…"
+TOOL_STATUS["tg_send_photo"] = "tool_status.tg_send_photo"
+TOOL_STATUS["tg_edit_message"] = "tool_status.tg_edit_message"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -943,10 +946,10 @@ async def tg_send_sticker(ctx: TelegramContext, sticker: str,
             message_thread_id   = thr,
             reply_to_message_id = int(reply_to_id) if reply_to_id else None,
         )
-        return f"✅ Đã gửi sticker (ID {msg.message_id}) tới {target}."
+        return t("tools.sticker_sent", ctx.lang, mid=msg.message_id, target=target)
     except Exception as e:
         logger.error("tg_send_sticker: %s", e)
-        return f"❌ Gửi sticker thất bại: {e}"
+        return t("tools.sticker_failed", ctx.lang, err=e)
 
 
 async def tg_send_animation(ctx: TelegramContext, animation: str,
@@ -963,17 +966,17 @@ async def tg_send_animation(ctx: TelegramContext, animation: str,
             message_thread_id   = thr,
             reply_to_message_id = int(reply_to_id) if reply_to_id else None,
         )
-        return f"✅ Đã gửi animation/GIF (ID {msg.message_id}) tới {target}."
+        return t("tools.animation_sent", ctx.lang, mid=msg.message_id, target=target)
     except Exception as e:
         logger.error("tg_send_animation: %s", e)
-        return f"❌ Gửi animation thất bại: {e}"
+        return t("tools.animation_failed", ctx.lang, err=e)
 
 
 # Register handlers + status labels
 TG_HANDLERS["tg_send_sticker"]   = tg_send_sticker
 TG_HANDLERS["tg_send_animation"] = tg_send_animation
-TOOL_STATUS["tg_send_sticker"]   = "🎭 Đang gửi sticker…"
-TOOL_STATUS["tg_send_animation"] = "🎬 Đang gửi animation/GIF…"
+TOOL_STATUS["tg_send_sticker"] = "tool_status.tg_send_sticker"
+TOOL_STATUS["tg_send_animation"] = "tool_status.tg_send_animation"
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1002,19 +1005,19 @@ async def tg_edit_message(ctx: TelegramContext, message_id: int,
             text       = text[:4096],
             parse_mode = pm,
         )
-        return f"✅ Đã sửa tin nhắn {message_id}."
+        return t("tools.message_edited", ctx.lang, mid=message_id)
     except Exception as e:
         err = str(e).lower()
-        # Telegram báo lỗi này khi tin nhắn có media (ảnh/file/video...)
+        # Telegram reports this error when the message has media (photo/file/video...)
         is_media_msg = (
             "there is no text in the message to edit" in err
             or "message can't be edited" in err
         )
         if not is_media_msg:
             logger.error("tg_edit_message text: %s", e)
-            return f"❌ Sửa thất bại: {e}"
+            return t("tools.edit_failed", ctx.lang, err=e)
 
-    # Fallback: sửa caption của media message
+    # Fallback: edit the caption of a media message
     try:
         await ctx.bot.edit_message_caption(
             chat_id    = target,
@@ -1022,10 +1025,10 @@ async def tg_edit_message(ctx: TelegramContext, message_id: int,
             caption    = text[:1024],
             parse_mode = pm,
         )
-        return f"✅ Đã sửa caption tin nhắn {message_id}."
+        return t("tools.caption_edited", ctx.lang, mid=message_id)
     except Exception as e2:
         logger.error("tg_edit_message caption fallback: %s", e2)
-        return f"❌ Sửa caption thất bại: {e2}"
+        return t("tools.caption_edit_failed", ctx.lang, err=e2)
 
 
 # Cập nhật dispatcher (ghi đè entry cũ)
@@ -1119,7 +1122,7 @@ async def tg_send_document(
                 # Tải về RAM
                 entry = await _fc.download(file_ref)
                 if not entry:
-                    return f"❌ Không thể tải file từ URL: {file_ref}"
+                    return t("tools.file_url_fetch_failed", ctx.lang, ref=file_ref)
 
             fname = filename or entry.filename
             buf   = _io.BytesIO(entry.data)
@@ -1175,16 +1178,16 @@ async def tg_send_document(
             logger.info("[tg_send_document] Đã lưu file_id cho %s", cache_key[:60])
 
         size_info = f"{len(entry.data) // 1024} KB" if is_url and entry else fname
-        return f"✅ Đã gửi {method} '{fname}' ({size_info}) tới {target} (msg_id={msg.message_id})."
+        return t("tools.file_sent", ctx.lang, method=method, fname=fname, size=size_info, target=target, mid=msg.message_id)
 
     except Exception as e:
         logger.error("tg_send_document: %s", e)
-        return f"❌ Gửi file thất bại: {e}"
+        return t("tools.file_send_failed", ctx.lang, err=e)
 
 
 # Đăng ký handler + status
 TG_HANDLERS["tg_send_document"] = tg_send_document
-TOOL_STATUS["tg_send_document"] = "📤 Đang gửi file…"
+TOOL_STATUS["tg_send_document"] = "tool_status.tg_send_document"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1308,10 +1311,10 @@ async def tg_leave_chat(ctx: TelegramContext, chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
     try:
         await ctx.bot.leave_chat(chat_id=target)
-        return f"✅ Bot đã thoát khỏi chat {target}."
+        return t("tools.left_chat", ctx.lang, target=target)
     except Exception as e:
         logger.error("tg_leave_chat: %s", e)
-        return f"❌ Thoát chat thất bại: {e}"
+        return t("tools.leave_chat_failed", ctx.lang, err=e)
 
 
 async def tg_create_invite_link(ctx: TelegramContext, chat_id=None,
@@ -1330,42 +1333,43 @@ async def tg_create_invite_link(ctx: TelegramContext, chat_id=None,
             member_limit         = int(member_limit) if member_limit else None,
             creates_join_request = bool(creates_join_request),
         )
-        parts = [f"✅ Đã tạo invite link cho {target}:", f"🔗 {link.invite_link}"]
+        parts = [t("tools.invite_link_created", ctx.lang, target=target),
+                 t("tools.invite_link_line", ctx.lang, link=link.invite_link)]
         if name:
-            parts.append(f"📛 Tên: {name}")
+            parts.append(t("tools.invite_link_name", ctx.lang, name=name))
         if expire_hours:
-            parts.append(f"⏰ Hết hạn sau {expire_hours}h")
+            parts.append(t("tools.invite_link_expiry", ctx.lang, hours=expire_hours))
         if member_limit:
-            parts.append(f"👥 Giới hạn: {member_limit} người")
+            parts.append(t("tools.invite_link_limit", ctx.lang, limit=member_limit))
         return "\n".join(parts)
     except Exception as e:
         logger.error("tg_create_invite_link: %s", e)
-        return f"❌ Tạo invite link thất bại: {e}"
+        return t("tools.invite_link_failed", ctx.lang, err=e)
 
 
 async def tg_invite_user(ctx: TelegramContext, user_id: int, chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     try:
         await ctx.bot.add_chat_member(chat_id=target, user_id=uid)
-        return f"✅ Đã thêm user {uid} vào {target}."
+        return t("tools.invited_user", ctx.lang, uid=uid, target=target)
     except Exception as e:
         logger.error("tg_invite_user: %s", e)
-        return f"❌ Mời user thất bại: {e}"
+        return t("tools.invite_user_failed", ctx.lang, err=e)
 
 
 async def tg_resolve_user(ctx: TelegramContext, username: str) -> str:
     handle = str(username).strip().lstrip("@")
     if not handle:
-        return "❌ Thiếu username cần tra."
+        return t("tools.resolve_missing_username", ctx.lang)
     uid = await _resolve_user(ctx, f"@{handle}")
     if uid is None:
-        return _user_not_found_msg(f"@{handle}")
+        return _user_not_found_msg(f"@{handle}", ctx.lang)
     known = state.get_known_user(uid)
     extra = f" ({known['name']})" if known and known.get("name") else ""
-    return f"✅ @{handle} → user_id: {uid}{extra}"
+    return t("tools.resolved_user", ctx.lang, handle=handle, uid=uid, extra=extra)
 
 
 async def tg_send_media_group(ctx: TelegramContext, media: list,
@@ -1373,7 +1377,7 @@ async def tg_send_media_group(ctx: TelegramContext, media: list,
     target = _resolve_chat(ctx, chat_id)
     thr    = int(thread_id) if thread_id else ctx.thread_id
     if not media:
-        return "❌ Danh sách media trống."
+        return t("tools.media_group_empty", ctx.lang)
 
     items = []
     for i, m in enumerate(media[:10]):
@@ -1388,46 +1392,46 @@ async def tg_send_media_group(ctx: TelegramContext, media: list,
             items.append(_IMP(media=src, caption=caption, parse_mode="HTML" if caption else None))
 
     if not items:
-        return "❌ Không có media hợp lệ."
+        return t("tools.media_group_invalid", ctx.lang)
     try:
         msgs = await ctx.bot.send_media_group(
             chat_id=target, media=items, message_thread_id=thr
         )
-        return f"✅ Đã gửi album {len(msgs)} media tới {target}."
+        return t("tools.media_group_sent", ctx.lang, n=len(msgs), target=target)
     except Exception as e:
         logger.error("tg_send_media_group: %s", e)
-        return f"❌ Gửi media group thất bại: {e}"
+        return t("tools.media_group_failed", ctx.lang, err=e)
 
 
 async def tg_get_user_info(ctx: TelegramContext, user_id: int, chat_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     lines  = []
     try:
         member = await ctx.bot.get_chat_member(chat_id=target, user_id=uid)
         u = member.user
         lines += [
-            f"👤 {u.full_name}",
-            f"🆔 ID: {u.id}",
+            t("tools.user_info_name", ctx.lang, name=u.full_name),
+            t("tools.user_info_id", ctx.lang, id=u.id),
         ]
         if u.username:
-            lines.append(f"🔗 @{u.username}")
-        lines.append(f"📋 Status: {member.status}")
+            lines.append(t("tools.user_info_username", ctx.lang, username=u.username))
+        lines.append(t("tools.user_info_status", ctx.lang, status=member.status))
         if hasattr(member, "custom_title") and member.custom_title:
-            lines.append(f"🏷️ Title: {member.custom_title}")
+            lines.append(t("tools.user_info_title", ctx.lang, title=member.custom_title))
         if u.is_bot:
-            lines.append("🤖 Bot: Có")
+            lines.append(t("tools.user_info_is_bot", ctx.lang))
     except Exception:
         known = state.get_known_user(uid)
-        lines.append(f"🆔 ID: {uid} (không lấy được thông tin từ chat này)")
+        lines.append(t("tools.user_info_fetch_failed", ctx.lang, uid=uid))
         if known:
             if known.get("name"):
-                lines.append(f"👤 {known['name']}")
+                lines.append(t("tools.user_info_name", ctx.lang, name=known['name']))
             if known.get("username"):
-                lines.append(f"🔗 @{known['username']}")
-    return "\n".join(lines) if lines else f"Không tìm thấy user {uid}."
+                lines.append(t("tools.user_info_username", ctx.lang, username=known['username']))
+    return "\n".join(lines) if lines else t("tools.user_info_not_found", ctx.lang, uid=uid)
 
 
 async def tg_set_user_title(ctx: TelegramContext, user_id: int,
@@ -1435,14 +1439,14 @@ async def tg_set_user_title(ctx: TelegramContext, user_id: int,
     target = _resolve_chat(ctx, chat_id)
     uid = await _resolve_user(ctx, user_id)
     if uid is None:
-        return _user_not_found_msg(user_id)
+        return _user_not_found_msg(user_id, ctx.lang)
     try:
         await ctx.bot.set_chat_administrator_custom_title(
             chat_id=target, user_id=uid, custom_title=title[:16]
         )
-        return f"✅ Đã đặt title '{title}' cho user {uid}."
+        return t("tools.user_title_set", ctx.lang, title=title, uid=uid)
     except Exception as e:
-        return f"❌ Đặt title thất bại: {e}"
+        return t("tools.user_title_failed", ctx.lang, err=e)
 
 
 TG_HANDLERS["tg_leave_chat"]        = tg_leave_chat
@@ -1453,10 +1457,10 @@ TG_HANDLERS["tg_send_media_group"]  = tg_send_media_group
 TG_HANDLERS["tg_get_user_info"]     = tg_get_user_info
 TG_HANDLERS["tg_set_user_title"]    = tg_set_user_title
 
-TOOL_STATUS["tg_leave_chat"]         = "🚪 Đang thoát chat…"
-TOOL_STATUS["tg_create_invite_link"] = "🔗 Đang tạo invite link…"
-TOOL_STATUS["tg_invite_user"]        = "➕ Đang mời user…"
-TOOL_STATUS["tg_resolve_user"]       = "🔎 Đang tra user_id…"
-TOOL_STATUS["tg_send_media_group"]   = "🖼️ Đang gửi album…"
-TOOL_STATUS["tg_get_user_info"]      = "👤 Đang lấy thông tin user…"
-TOOL_STATUS["tg_set_user_title"]     = "🏷️ Đang đặt title…"
+TOOL_STATUS["tg_leave_chat"] = "tool_status.tg_leave_chat"
+TOOL_STATUS["tg_create_invite_link"] = "tool_status.tg_create_invite_link"
+TOOL_STATUS["tg_invite_user"] = "tool_status.tg_invite_user"
+TOOL_STATUS["tg_resolve_user"] = "tool_status.tg_resolve_user"
+TOOL_STATUS["tg_send_media_group"] = "tool_status.tg_send_media_group"
+TOOL_STATUS["tg_get_user_info"] = "tool_status.tg_get_user_info"
+TOOL_STATUS["tg_set_user_title"] = "tool_status.tg_set_user_title"

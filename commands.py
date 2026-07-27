@@ -617,7 +617,6 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Cancel a pending feed-reply ForceReply prompt."""
     if not _owner_only(update):
         return
-    msg  = update.message
     chat = update.effective_chat
     # Cancel any pending_feed_reply for this chat
     # (scan all keys matching this chat_id)
