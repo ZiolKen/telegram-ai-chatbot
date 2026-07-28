@@ -2,9 +2,11 @@
 file_process.py — Tải & xử lý file người dùng gửi lên (INBOUND).
 
 Khác với file_cache.py (chỉ lo file bot GỬI RA, cache trong RAM), module này
-lo file NGƯỜI DÙNG GỬI LÊN cho bot: tải về /tmp bằng file_id thật của
-Telegram rồi cố gắng đưa NỘI DUNG cho Gemini, thay vì chỉ ghi lại
-tên/kích thước như trước.
+lo file NGƯỜI DÙNG GỬI LÊN cho bot: tải về thẳng /tmp (không có thư mục
+con riêng — file được đặt tên với prefix "tgbot_incoming_" để phân biệt
+với file của process khác trong /tmp) bằng file_id thật của Telegram rồi
+cố gắng đưa NỘI DUNG cho Gemini, thay vì chỉ ghi lại tên/kích thước như
+trước.
 
 Luồng xử lý 1 file:
   1. bot.get_file(file_id) + download_to_drive() → tải về /tmp (file thật,
@@ -17,16 +19,23 @@ Luồng xử lý 1 file:
   5. Trường hợp còn lại (không hỗ trợ, hoặc quá lớn) → fallback: chỉ giữ
      dòng metadata cũ (tên/size/file_id), không có nội dung.
 
-File /tmp được xoá ngay sau khi xử lý xong (không cần giữ lâu dài — Render
-có thể restart bất kỳ lúc nào và không có phần nào khác trong code đọc lại
-file theo path này).
+File /tmp KHÔNG bị xoá ngay sau khi xử lý xong nữa — được giữ lại và dọn
+bởi một vòng lặp nền (`start_cleanup_loop`, chạy trong main.py) xoá các
+file cũ hơn FILE_RETENTION_SECONDS (mặc định 24h). Vì lưu thẳng trong /tmp
+dùng chung cho cả container, vòng dọn CHỈ xoá file có prefix
+FILENAME_PREFIX — không đụng tới file của process/thư viện khác. Lưu ý:
+Render có thể restart bất kỳ lúc nào nên phần file chưa kịp dọn sẽ mất theo
+container — không sao vì không có phần nào khác trong code đọc lại file
+theo path này, đây chỉ là giữ lại để debug/audit trong vòng 24h.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import mimetypes
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Optional
@@ -38,10 +47,22 @@ from i18n import DEFAULT_LANG, t
 
 logger = logging.getLogger(__name__)
 
-TMP_DIR = "/tmp/tgbot_incoming"
-os.makedirs(TMP_DIR, exist_ok=True)
+TMP_DIR = "/tmp"
+
+# Mọi file bot tải về đều được đặt tên với prefix này. /tmp là thư mục dùng
+# chung cho CẢ container (pip, os.tempfile, các process khác...), nên vòng
+# lặp dọn dẹp (_sweep_expired_once) CHỈ được phép động vào file có prefix
+# này — tuyệt đối không quét/xoá toàn bộ /tmp, tránh xoá nhầm file của
+# process/thư viện khác.
+FILENAME_PREFIX = "tgbot_incoming_"
 
 MAX_MEDIA_BYTES = MAX_MEDIA_MB * 1024 * 1024
+
+# File trong TMP_DIR được giữ lại tối đa từng này giây trước khi bị dọn.
+FILE_RETENTION_SECONDS = 24 * 60 * 60  # 24h
+
+# Tần suất chạy vòng quét dọn file hết hạn.
+CLEANUP_SWEEP_INTERVAL_SECONDS = 60 * 60  # 1h/lần là đủ, không cần quét dày
 
 # MIME mà Gemini nhận trực tiếp qua inlineData — Gemini tự đọc nội dung
 # (ảnh/audio/video/PDF), bot không cần tự trích xuất text.
@@ -93,7 +114,7 @@ async def _download(bot: Bot, file_id: str, filename: str, size: Optional[int]) 
         return None
 
     ext  = os.path.splitext(filename)[1] or ""
-    path = os.path.join(TMP_DIR, f"{uuid.uuid4().hex}{ext}")
+    path = os.path.join(TMP_DIR, f"{FILENAME_PREFIX}{uuid.uuid4().hex}{ext}")
     try:
         await tg_file.download_to_drive(path)
     except Exception as e:
@@ -102,13 +123,61 @@ async def _download(bot: Bot, file_id: str, filename: str, size: Optional[int]) 
     return path
 
 
-def _cleanup(path: Optional[str]) -> None:
-    if not path:
-        return
+def _sweep_expired_once(now: Optional[float] = None) -> int:
+    """Quét TMP_DIR 1 lần, xoá file CỦA BOT (prefix FILENAME_PREFIX) có
+    mtime cũ hơn FILE_RETENTION_SECONDS.
+
+    TMP_DIR = "/tmp" dùng chung cho cả container nên hàm này CHỈ được xét
+    entry.name.startswith(FILENAME_PREFIX) — không bao giờ xoá file không
+    phải do file_process.py tạo ra.
+
+    Trả về số file đã xoá. Chạy đồng bộ (os.scandir/os.remove nhanh, không
+    cần async) — được gọi định kỳ bởi start_cleanup_loop().
+    """
+    now = now if now is not None else time.time()
+    removed = 0
     try:
-        os.remove(path)
-    except OSError:
-        pass
+        entries = os.scandir(TMP_DIR)
+    except OSError as e:
+        logger.warning("[file_process] Không đọc được TMP_DIR để dọn: %s", e)
+        return 0
+
+    with entries:
+        for entry in entries:
+            try:
+                if not entry.name.startswith(FILENAME_PREFIX):
+                    continue
+                if not entry.is_file():
+                    continue
+                age = now - entry.stat().st_mtime
+                if age < FILE_RETENTION_SECONDS:
+                    continue
+                os.remove(entry.path)
+                removed += 1
+            except OSError as e:
+                logger.warning("[file_process] Lỗi khi dọn '%s': %s", entry.path, e)
+
+    if removed:
+        logger.info("[file_process] Cleanup sweep: đã xoá %d file quá 24h.", removed)
+    return removed
+
+
+async def start_cleanup_loop(interval_seconds: int = CLEANUP_SWEEP_INTERVAL_SECONDS) -> None:
+    """Vòng lặp nền: định kỳ dọn các file /tmp đã quá FILE_RETENTION_SECONDS.
+
+    Chạy vô hạn cho tới khi bị cancel (main.py cancel task này lúc shutdown).
+    Chạy 1 lần ngay lúc start để dọn rác còn sót từ lần restart trước.
+    """
+    logger.info(
+        "[file_process] Cleanup loop bắt đầu — quét mỗi %ds, giữ file %ds (~%.0fh).",
+        interval_seconds, FILE_RETENTION_SECONDS, FILE_RETENTION_SECONDS / 3600,
+    )
+    while True:
+        try:
+            _sweep_expired_once()
+        except Exception as e:
+            logger.error("[file_process] Cleanup sweep lỗi bất ngờ: %s", e)
+        await asyncio.sleep(interval_seconds)
 
 
 def _extract_docx(path: str, lang: str = DEFAULT_LANG) -> Optional[str]:
@@ -208,46 +277,39 @@ async def process_incoming_file(
     size:     Optional[int],
     lang:     str = DEFAULT_LANG,
 ) -> FileResult:
-    """Tải file thật + trả về nội dung dùng được cho Gemini (nếu có)."""
+    """Tải file thật + trả về nội dung dùng được cho Gemini (nếu có).
+
+    Lưu ý: file tải về TMP_DIR KHÔNG bị xoá ở cuối hàm này nữa — được giữ
+    lại và dọn định kỳ bởi start_cleanup_loop() (xoá sau FILE_RETENTION_SECONDS).
+    """
     path = await _download(bot, file_id, filename, size)
     if not path:
         return FileResult()  # quá lớn hoặc tải lỗi → fallback metadata-only
 
-    try:
-        mime = _guess_mime(filename, tg_mime)
-        ext  = os.path.splitext(filename)[1].lower()
+    mime = _guess_mime(filename, tg_mime)
+    ext  = os.path.splitext(filename)[1].lower()
 
-        if mime in GEMINI_INLINE_MIMES:
-            with open(path, "rb") as f:
-                data = f.read()
-            b64 = base64.b64encode(data).decode("ascii")
-            return FileResult(media_part={"inlineData": {"mimeType": mime, "data": b64}})
+    if mime in GEMINI_INLINE_MIMES:
+        with open(path, "rb") as f:
+            data = f.read()
+        b64 = base64.b64encode(data).decode("ascii")
+        return FileResult(media_part={"inlineData": {"mimeType": mime, "data": b64}})
 
-        if ext == ".docx":
-            text = _extract_docx(path, lang)
-            if text:
-                return FileResult(extra_text=text)
-            return FileResult()
+    if ext == ".docx":
+        text = _extract_docx(path, lang)
+        return FileResult(extra_text=text) if text else FileResult()
 
-        if ext == ".xlsx":
-            text = _extract_xlsx(path, lang)
-            if text:
-                return FileResult(extra_text=text)
-            return FileResult()
+    if ext == ".xlsx":
+        text = _extract_xlsx(path, lang)
+        return FileResult(extra_text=text) if text else FileResult()
 
-        if ext == ".pptx":
-            text = _extract_pptx(path, lang)
-            if text:
-                return FileResult(extra_text=text)
-            return FileResult()
+    if ext == ".pptx":
+        text = _extract_pptx(path, lang)
+        return FileResult(extra_text=text) if text else FileResult()
 
-        if ext in TEXT_EXTS or mime.startswith("text/"):
-            text = _read_text(path, lang)
-            if text:
-                return FileResult(extra_text=text)
-            return FileResult()
+    if ext in TEXT_EXTS or mime.startswith("text/"):
+        text = _read_text(path, lang)
+        return FileResult(extra_text=text) if text else FileResult()
 
-        # Định dạng chưa hỗ trợ trích xuất (vd .zip, .xls cũ, .rar...)
-        return FileResult()
-    finally:
-        _cleanup(path)
+    # Định dạng chưa hỗ trợ trích xuất (vd .zip, .xls cũ, .rar...)
+    return FileResult()

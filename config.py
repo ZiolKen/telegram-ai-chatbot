@@ -64,10 +64,19 @@ FILE_CACHE_MAX_MB: int = int(os.getenv("FILE_CACHE_MAX_MB", "256"))
 
 # ── Inbound file processing (đọc nội dung file user gửi lên) ──────────────
 # Kích thước tối đa (MB) bot sẽ TẢI VỀ để đọc nội dung thật (ảnh/pdf/audio/
-# video/docx/text...). Telegram Bot API giới hạn getFile ở 20MB nên đừng đặt
-# quá 20. File lớn hơn mức này vẫn được nhận diện (tên/size/file_id) nhưng
-# bot sẽ không đọc được nội dung bên trong.
-MAX_MEDIA_MB: int = int(os.getenv("MAX_MEDIA_MB", "18"))
+# video/docx/text...). File lớn hơn mức này vẫn được nhận diện (tên/size/
+# file_id) nhưng bot sẽ không đọc được nội dung bên trong.
+#
+# ⚠️ LƯU Ý QUAN TRỌNG: giá trị 15360 MB (15GB) này chỉ có tác dụng nếu bot
+# chạy trên Local Bot API Server (self-hosted, hỗ trợ tới 2000MB/file theo
+# tài liệu Telegram, có thể patch thêm). Với Telegram Bot API CLOUD mặc
+# định (api.telegram.org — đây là chế độ code hiện đang dùng, KHÔNG chạy
+# Local Bot API Server), bot.get_file() bị Telegram giới hạn cứng ở 20MB —
+# đặt MAX_MEDIA_MB cao hơn 20 sẽ KHÔNG tải được file lớn hơn 20MB, dù biến
+# này cho phép. Nếu cần thật sự nhận file tới 15GB, phải tự host Local Bot
+# API Server (xem https://github.com/tdlib/telegram-bot-api) và trỏ
+# `base_url` của `python-telegram-bot` sang server đó.
+MAX_MEDIA_MB: int = int(os.getenv("MAX_MEDIA_MB", "15360"))
 
 # ── Language ─────────────────────────────────────────────────────────────
 # Default UI + AI prompt language for new conversations.

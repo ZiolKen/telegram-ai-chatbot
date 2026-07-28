@@ -13,7 +13,8 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | **Web** | Tavily (primary) & DuckDuckGo (fallback) search, full-page URL fetch, ArXiv paper search |
 | **Code** | `run_python` — full Python (stdlib + installed packages, incl. network/filesystem, 60s timeout), owner-only, every run mirrored to the owner's chat as an audit log |
 | **Messaging** | Send text, photos, stickers, GIFs, polls, dice to any chat or channel |
-| **Files** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 256 MB |
+| **Files (outbound)** | Send any file format (document, audio, video, image) via URL or `file_id`; in-RAM cache up to 256 MB |
+| **Files (inbound)** | Reads content of files users upload — images/audio/video/PDF go straight to Gemini as inline data, `.docx`/`.xlsx`/`.pptx`/plain text are text-extracted. Downloaded to `/tmp` (prefixed `tgbot_incoming_`), kept for 24h for debugging then auto-deleted by a background sweep — not written to any persistent store |
 | **Moderation** | Ban, unban, mute, unmute users; warn system with auto-ban at 3 warnings (default); `/feed` buffer (last 100 messages) with inline action buttons — the **Reply** button sends a ForceReply prompt so you can type a response that gets forwarded to the original group message without leaving your private chat |
 | **Admin** | Promote/demote admins (with granular permission flags + custom title), pin/unpin messages, delete messages, forward, copy |
 | **Chat mgmt** | Set title/description, get chat/user info, member count, create invite links, invite/remove users, leave chats, send media albums |
@@ -58,7 +59,8 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | `MAX_HISTORY` | `40` | Max conversation turns kept in memory per conversation |
 | `MAX_CONV_ROWS` | `10000` | Max rows in the PostgreSQL `conversations` table before LRU pruning |
 | `GROUP_CONTEXT_ENABLED` | `true` | Store all group messages (from everyone) as shared context |
-| `FILE_CACHE_MAX_MB` | `256` | RAM limit for the in-memory file cache (MB) |
+| `FILE_CACHE_MAX_MB` | `256` | RAM limit for the in-memory file cache (MB) — outbound files only, see [Files](#files-inbound--outbound) |
+| `MAX_MEDIA_MB` | `15360` (15GB) | Max size (MB) of an **inbound** user-uploaded file the bot will download to read its content. ⚠️ On the default Telegram Cloud Bot API (what this project uses), `getFile` is hard-capped at **20MB** by Telegram itself — values above 20 only take effect if you self-host a [Local Bot API Server](https://github.com/tdlib/telegram-bot-api) and point `python-telegram-bot`'s `base_url` at it. Files above the effective limit are still recognized (name/size/`file_id`) but their content isn't read. |
 | `ENABLE_PLUGINS` | `true` | Enable all tools/plugins globally |
 | `DEFAULT_LANG` | `en` | Default bot language (`en` = English, `vi` = Vietnamese). Override per-conversation with `/lang` |
 | `ENABLE_FOLLOWUP` | `true` | Generate follow-up question buttons after responses |
@@ -162,8 +164,10 @@ and config — `/model` or `/plugins` in topic A do not affect topic B.
 
 | Model | Notes |
 |---|---|
+| `gemini-3.6-flash` | Latest Gemini 3.6 |
+| `gemini-3.5-flash-lite` | Latest Gemini 3.5 |
 | `gemini-3.1-flash-lite` | **Default** — fastest, lowest cost |
-| `gemini-3.5-flash` | Latest Gemini 3.5 |
+| `gemini-3.5-flash` | Gemini 3.5 |
 | `gemini-3-flash-preview` | Gemini 3.0 preview |
 | `gemini-2.5-flash` | Gemini 2.5 stable |
 | `gemini-2.5-flash-lite-preview-06-17` | Lightweight 2.5 |
@@ -296,7 +300,8 @@ commands.py       Slash command handlers
 tools_web.py      web_search, fetch_url, arxiv_search
 tools_code.py     run_python (unrestricted subprocess, 60s timeout, mirrors code+output to owner)
 tools_telegram.py 31 Telegram action tools
-file_cache.py     In-RAM file cache (LRU eviction, no disk/DB writes)
+file_cache.py     In-RAM file cache (LRU eviction, no disk/DB writes) — OUTBOUND files (bot → Telegram)
+file_process.py   Inbound file processing — downloads user uploads to /tmp, extracts content for Gemini, 24h background cleanup sweep (see Security notes)
 utils.py          md_to_html, split_message, merge
 ```
 
@@ -352,6 +357,36 @@ tg_send_document(url="https://...")
     ├─ cache hit, no file_id?   →  InputFile(BytesIO)  →  upload  →  store file_id
     └─ cache miss               →  download  →  cache bytes  →  upload  →  store file_id
 ```
+
+### Inbound file flow (user → bot)
+
+```
+User uploads a file
+    │
+    ▼
+file_process.process_incoming_file()
+    │
+    ├─ bot.get_file() + download_to_drive()
+    │       → /tmp/tgbot_incoming_<uuid><ext>   (flat in /tmp, prefixed, no subfolder)
+    │
+    ├─ image/audio/video/PDF  → base64 inlineData part → Gemini reads it directly
+    ├─ .docx/.xlsx/.pptx      → text-extracted (python-docx/openpyxl/python-pptx)
+    ├─ .txt/.md/.csv/code/... → read as plain text
+    └─ unsupported / too big  → metadata only (name/size/file_id), no content
+                │
+                ▼
+        file is NOT deleted here anymore — left on disk
+                │
+                ▼
+  file_process.start_cleanup_loop()  (background asyncio task, started in main.py)
+        sweeps /tmp every hour, deletes any tgbot_incoming_* file older than 24h
+```
+
+The 24h retention exists purely for local debugging — nothing else in the code reads these
+files back by path once `process_incoming_file()` returns. The sweep only ever touches files
+with the `tgbot_incoming_` prefix, so it's safe to run against `/tmp` even though the OS/other
+processes also use that directory.
+
 
 ---
 
@@ -414,7 +449,8 @@ Set that as `DB_READONLY_URL`. This role can `SELECT` but literally cannot `INSE
 - Tools that require admin rights (`tg_ban_user`, `tg_pin_message`, `tg_delete_message`, etc.) require the bot to have the corresponding admin permission in the target group.
 - The bot must be a member of any group or channel before `tg_send_message` can target it.
 - `run_python` has full network/filesystem access and no import restrictions — see [Security notes](#security-notes) for why this is safe here and how to configure `DB_READONLY_URL`.
-- The in-memory file cache is cleared on every Render restart. Telegram `file_id` values remain valid across restarts and can be reused.
+- The in-memory file cache (outbound files, `file_cache.py`) is cleared on every Render restart. Telegram `file_id` values remain valid across restarts and can be reused.
+- Inbound user-uploaded files (`file_process.py`) are downloaded straight into `/tmp` (prefixed `tgbot_incoming_`, no subfolder) and kept for **24h** before a background sweep deletes them — they're never re-read after the upload is processed, the retention is only for debugging. A Render restart can wipe them earlier than 24h since `/tmp` isn't persistent storage.
 - Conversation history is persisted in PostgreSQL and restored on startup, so context survives restarts.
 - The `MAX_CONV_ROWS` limit prunes the oldest rows in the `conversations` table to prevent unbounded growth.
 - The `/feed` buffer holds the last **100 messages** per group (in-memory, cleared on restart). `GROUP_CONTEXT_ENABLED=true` is required to populate it.

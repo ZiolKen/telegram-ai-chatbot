@@ -33,6 +33,7 @@ from telegram.ext import (
 
 import db
 import file_cache
+import file_process
 import state
 from config import (
     BOT_TOKEN, DATABASE_URL, FILE_CACHE_MAX_MB, GEMINI_KEYS, MAX_CONV_ROWS,
@@ -179,6 +180,9 @@ async def run_webhook(app: Application) -> None:
     file_cache.configure(FILE_CACHE_MAX_MB)
     logger.info("[startup] File cache: %d MB limit", FILE_CACHE_MAX_MB)
 
+    # ── Vòng lặp nền: dọn file /tmp (inbound) sau 24h ──────────────────────
+    cleanup_task = asyncio.create_task(file_process.start_cleanup_loop())
+
     # ── 2. Web server lên (Render health check pass từ đây) ───────────────
     aio = web.Application()
     aio.router.add_get("/",   health)
@@ -206,6 +210,7 @@ async def run_webhook(app: Application) -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        cleanup_task.cancel()
         await app.stop()
         await app.shutdown()
         await db.close()
@@ -229,6 +234,8 @@ async def run_polling(app: Application) -> None:
     else:
         logger.warning("[startup] DATABASE_URL not set — in-memory only.")
 
+    cleanup_task = asyncio.create_task(file_process.start_cleanup_loop())
+
     await app.initialize()
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
@@ -237,6 +244,7 @@ async def run_polling(app: Application) -> None:
     try:
         await asyncio.Event().wait()
     finally:
+        cleanup_task.cancel()
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
