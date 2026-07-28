@@ -42,6 +42,7 @@ _topic_mode:    dict[int,  bool]        = {}
 _conv_cfg:      dict[str,  dict]        = {}
 
 pending_texts: dict[str, list[str]]    = defaultdict(list)
+pending_media: dict[str, list[dict]]   = defaultdict(list)  # inlineData parts (ảnh/pdf/audio/video)
 pending_tasks: dict[str, asyncio.Task] = {}
 
 # Pending manual feed replies triggered by the ↩️ Reply button.

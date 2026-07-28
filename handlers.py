@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 import state
 from state import FeedEntry
 import utils
+import file_process
 from agent import build_system_prompt, generate_followup, run_agent
 from i18n import t
 from config import DEFAULT_LANG
@@ -78,8 +79,8 @@ def _fq_get(key: str, idx: int) -> str | None:
 # Model label map
 # ─────────────────────────────────────────────────────────────
 _MODEL_LABELS: dict[str, str] = {
-    "gemini-3.6-flash":               "3.6 Flash 🔰",
-    "gemini-3.5-flash-lite":               "3.5 Flash Lite 💠 (mặc định)",
+    "gemini-3.6-flash":                    "3.6 Flash 🔰",
+    "gemini-3.5-flash-lite":               "3.5 Flash Lite 💠",
     "gemini-3.1-flash-lite":               "3.1 Flash Lite ⚡",
     "gemini-3.5-flash":                    "3.5 Flash 🌟",
     "gemini-3-flash-preview":              "3 Flash Preview 💥",
@@ -151,6 +152,66 @@ def _extract_text(msg: Message, bot_username: str) -> Optional[str]:
         return f"{caption}\n{base}" if caption else base
 
     return None
+
+
+# ─────────────────────────────────────────────────────────────
+# Tải nội dung THẬT của file đính kèm (nếu có) cho Gemini
+# ─────────────────────────────────────────────────────────────
+async def _extract_media(msg: Message, bot, lang: str = "en") -> tuple[list[dict], Optional[str]]:
+    """
+    Tải file thật (photo/document/audio/video/voice/animation) về /tmp và
+    chuẩn bị nội dung cho Gemini:
+      • ảnh/audio/video/pdf → inlineData part (trả trong media_parts)
+      • docx/xlsx/pptx/text → trích xuất text (trả trong extra_text, để nối
+        vào prompt)
+    Nếu file không tải được / không hỗ trợ / quá lớn → trả về ([], None),
+    dòng metadata cũ trong `text` (từ _extract_text) vẫn còn nên agent
+    không mất hoàn toàn context.
+    """
+    media_parts: list[dict] = []
+    extra_texts: list[str]  = []
+
+    async def _handle(file_id: str, filename: str, tg_mime: Optional[str], size: Optional[int]):
+        try:
+            result = await file_process.process_incoming_file(
+                bot, file_id, filename, tg_mime, size, lang,
+            )
+        except Exception as e:
+            logger.warning("[_extract_media] process_incoming_file lỗi (%s): %s", filename, e)
+            return
+        if result.media_part:
+            media_parts.append(result.media_part)
+        if result.extra_text:
+            header = t("file.content_header", lang, filename=filename)
+            extra_texts.append(f"{header}\n{result.extra_text}")
+
+    if msg.photo:
+        photo = msg.photo[-1]
+        await _handle(photo.file_id, "photo.jpg", "image/jpeg", photo.file_size)
+    elif msg.document:
+        d = msg.document
+        await _handle(d.file_id, d.file_name or "file", d.mime_type, d.file_size)
+    elif msg.audio:
+        a    = msg.audio
+        name = a.file_name or f"{a.title or 'audio'}.mp3"
+        await _handle(a.file_id, name, a.mime_type, a.file_size)
+    elif msg.video:
+        v    = msg.video
+        name = v.file_name or "video.mp4"
+        await _handle(v.file_id, name, v.mime_type, v.file_size)
+    elif msg.voice:
+        vo = msg.voice
+        await _handle(vo.file_id, "voice.ogg", vo.mime_type or "audio/ogg", vo.file_size)
+    elif msg.video_note:
+        vn = msg.video_note
+        await _handle(vn.file_id, "video_note.mp4", "video/mp4", vn.file_size)
+    elif msg.animation:
+        an   = msg.animation
+        name = an.file_name or "animation.mp4"
+        await _handle(an.file_id, name, an.mime_type or "video/mp4", an.file_size)
+
+    extra_text = "\n\n".join(extra_texts) if extra_texts else None
+    return media_parts, extra_text
 
 
 def _fmt_size(size_bytes: Optional[int]) -> str:
@@ -260,6 +321,7 @@ async def _process(
     user_name:   str,
     text:        str,
     reply_to_id: Optional[int] = None,
+    media_parts: Optional[list[dict]] = None,
 ):
     cid         = state.conv_id(chat_id, user_id, thread_id, is_private,
                                 state.topic_mode(chat_id))
@@ -294,8 +356,9 @@ async def _process(
 
     typing_task = asyncio.create_task(_keep_typing(bot, chat_id, thread_id))
 
+    used_model: Optional[str] = None
     try:
-        response = await run_agent(
+        response, used_model = await run_agent(
             tg_ctx        = tg_ctx,
             user_text     = text,
             history       = history,
@@ -303,6 +366,7 @@ async def _process(
             model         = model_pref,
             use_plugins   = use_plugins,
             status_cb     = status_cb,
+            media_parts   = media_parts,
         )
     except Exception as e:
         logger.error("run_agent error: %s", e, exc_info=True)
@@ -314,6 +378,12 @@ async def _process(
                 await status_msg.delete()
             except Exception:
                 pass
+
+    # [MODEL] run_agent có thể tự fallback sang model khác (429/404) mà
+    # owner không biết — ghi lại model THỰC SỰ vừa trả lời để /status và
+    # /model hiển thị, thay vì chỉ hiện model đã CHỌN (có thể sai thực tế).
+    if used_model:
+        state.set_cfg(cid, last_used_model=used_model)
 
     # Lưu lịch sử: dùng [Name]: text cho group để nhất quán với push_context
     user_entry = f"[{user_name}]: {text}" if not is_private else text
@@ -338,12 +408,14 @@ async def _delayed_dispatch(
 ):
     try:
         await asyncio.sleep(MESSAGE_MERGE_DELAY)
-        msgs = state.pending_texts.pop(accu_key, [])
+        msgs  = state.pending_texts.pop(accu_key, [])
+        media = state.pending_media.pop(accu_key, [])
         if not msgs:
             return
         merged = utils.merge(msgs)
         await _process(bot, chat_id, user_id, message_id, thread_id,
-                       is_private, chat_title, user_name, merged, reply_to_id)
+                       is_private, chat_title, user_name, merged, reply_to_id,
+                       media_parts=media)
     finally:
         # Only drop our own task reference — a newer message may have
         # already replaced it with a fresh task in state.pending_tasks.
@@ -502,10 +574,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
+    # ── [FILE] Tải nội dung thật của file đính kèm (nếu có) cho Gemini ─
+    _cid_for_lang = state.conv_id(chat.id, user.id, thread_id, is_private,
+                                  state.topic_mode(chat.id))
+    lang_for_media = state.get_lang(_cid_for_lang)
+    media_parts, extra_text = await _extract_media(msg, context.bot, lang_for_media)
+    if extra_text:
+        text = f"{text}\n\n{extra_text}"
+
     reply_to_id = msg.message_id
     accu_key    = _build_accu_key(chat.id, user.id, thread_id)
 
     state.pending_texts[accu_key].append(text)
+    if media_parts:
+        state.pending_media[accu_key].extend(media_parts)
 
     if accu_key in state.pending_tasks:
         state.pending_tasks[accu_key].cancel()
@@ -564,7 +646,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_priv   = chat.type == ChatType.PRIVATE
         cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
                                   state.topic_mode(chat.id))
-        state.set_cfg(cid, model=model_name)
+        state.set_cfg(cid, model=model_name, last_used_model=None)
         _lang = state.get_cfg(cid).get("lang", DEFAULT_LANG)
         label = _MODEL_LABELS.get(model_name, model_name)
         try:

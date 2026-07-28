@@ -21,7 +21,7 @@ DB_READONLY_URL: str = os.getenv("DB_READONLY_URL", "")
 GEMINI_KEYS: list[str] = [
     k.strip() for k in os.getenv("GEMINI_KEYS", "").split(",") if k.strip()
 ]
-DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.5-flash-lite")
+DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.1-flash-lite")
 MODELS: list[str] = [
     "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
@@ -61,6 +61,13 @@ GROUP_CONTEXT_ENABLED: bool = os.getenv("GROUP_CONTEXT_ENABLED", "true").lower()
 # Tổng dung lượng tối đa cho file cache trong RAM. Files được evict LRU
 # khi vượt giới hạn. Cache xóa hoàn toàn khi Render restart.
 FILE_CACHE_MAX_MB: int = int(os.getenv("FILE_CACHE_MAX_MB", "256"))
+
+# ── Inbound file processing (đọc nội dung file user gửi lên) ──────────────
+# Kích thước tối đa (MB) bot sẽ TẢI VỀ để đọc nội dung thật (ảnh/pdf/audio/
+# video/docx/text...). Telegram Bot API giới hạn getFile ở 20MB nên đừng đặt
+# quá 20. File lớn hơn mức này vẫn được nhận diện (tên/size/file_id) nhưng
+# bot sẽ không đọc được nội dung bên trong.
+MAX_MEDIA_MB: int = int(os.getenv("MAX_MEDIA_MB", "18"))
 
 # ── Language ─────────────────────────────────────────────────────────────
 # Default UI + AI prompt language for new conversations.

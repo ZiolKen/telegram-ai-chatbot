@@ -70,6 +70,7 @@ _T: dict[str, dict[str, str]] = {
         # /model
         "model.current":   "🤖 Current model: <code>{model}</code>\n\nSelect model:",
         "model.switched":  "✅ Switched to <b>{label}</b>",
+        "model.fallback_note": "⚠️ Configured as <b>{configured}</b>, but the last reply actually came from <b>{actual}</b> (auto fallback — quota/rate-limit).",
 
         # /plugins
         "plugins.status":  "🔌 Plugins: {state}\nUse <code>/plugins on</code> or <code>/plugins off</code>.",
@@ -97,6 +98,7 @@ _T: dict[str, dict[str, str]] = {
         "status.history":  "📝 History",
         "status.msgs":     "{n} messages",
         "status.model":    "🤖 Model",
+        "status.model_fallback": "🤖 Model     : <b>{actual}</b> <i>(configured: {configured} — auto fallback active)</i>",
         "status.plugins":  "🔌 Plugins",
         "status.followup": "💬 Follow-up",
         "status.topic":    "🏷️ Topic Mode",
@@ -327,6 +329,11 @@ _T: dict[str, dict[str, str]] = {
         "tool_status.tg_get_user_info":          "👤 Getting user info…",
         "tool_status.tg_set_user_title":         "🏷️ Setting title…",
         "tool_status.tg_resolve_user":           "🔎 Resolving user…",
+
+        # Inbound file content (file_process.py / handlers._extract_media)
+        "file.content_header":     "--- Content of file '{filename}' ---",
+        "file.truncated":          "\n…[content truncated — too long]",
+        "file.xlsx_rows_truncated": "…[more rows, truncated]",
     },
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -373,6 +380,7 @@ _T: dict[str, dict[str, str]] = {
         # /model
         "model.current":  "🤖 Model hiện tại: <code>{model}</code>\n\nChọn model:",
         "model.switched": "✅ Đã đổi sang <b>{label}</b>",
+        "model.fallback_note": "⚠️ Đang chọn <b>{configured}</b>, nhưng câu trả lời gần nhất thực ra đến từ <b>{actual}</b> (tự fallback — do hết quota/rate-limit).",
 
         # /plugins
         "plugins.status":  "🔌 Plugins: {state}\nDùng <code>/plugins on</code> hoặc <code>/plugins off</code>.",
@@ -400,6 +408,7 @@ _T: dict[str, dict[str, str]] = {
         "status.history":  "📝 Lịch sử",
         "status.msgs":     "{n} tin",
         "status.model":    "🤖 Model",
+        "status.model_fallback": "🤖 Model     : <b>{actual}</b> <i>(đã chọn: {configured} — đang tự fallback)</i>",
         "status.plugins":  "🔌 Plugins",
         "status.followup": "💬 Followup",
         "status.topic":    "🏷️ Topic Mode",
@@ -630,6 +639,11 @@ _T: dict[str, dict[str, str]] = {
         "tool_status.tg_get_user_info":          "👤 Đang lấy thông tin user…",
         "tool_status.tg_set_user_title":         "🏷️ Đang đặt title…",
         "tool_status.tg_resolve_user":           "🔎 Đang tra user…",
+
+        # Inbound file content (file_process.py / handlers._extract_media)
+        "file.content_header":     "--- Nội dung file '{filename}' ---",
+        "file.truncated":          "\n…[nội dung bị cắt bớt vì quá dài]",
+        "file.xlsx_rows_truncated": "…[còn nhiều dòng hơn, đã cắt bớt]",
     },
 }
 

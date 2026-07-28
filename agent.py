@@ -147,17 +147,29 @@ async def run_agent(
     model:         Optional[str] = None,
     use_plugins:   bool = True,
     status_cb:     Optional[Callable] = None,
-) -> str:
+    media_parts:   Optional[list[dict]] = None,
+) -> tuple[str, Optional[str]]:
     """
     Drive a Gemini conversation with full multi-turn tool use.
-    Returns the final text reply.
+    Returns (final_text, model_name_actually_used).
+
+    model_name_actually_used may differ from the caller's preferred `model`
+    when that model was rate-limited/unavailable and the loop silently fell
+    back to the next one in MODELS — callers should surface this (e.g.
+    /status, /model) so the fallback isn't invisible to the owner.
+    It's None only in the total-failure path (no key/model responded at all).
+
+    media_parts: các inlineData part (ảnh/audio/video/PDF đã base64-hoá,
+    xem file_process.py) được đính kèm thẳng vào lượt user hiện tại — Gemini
+    tự đọc nội dung thay vì chỉ thấy tên file trong text.
     """
     preferred  = model or DEFAULT_MODEL
     model_list = [preferred] + [m for m in MODELS if m != preferred]
     tools      = ALL_TOOL_DECLS if use_plugins else None
 
+    user_parts = [{"text": user_text}] + list(media_parts or [])
     base_contents = list(history) + [
-        {"role": "user", "parts": [{"text": user_text}]}
+        {"role": "user", "parts": user_parts}
     ]
 
     async with aiohttp.ClientSession(timeout=GEMINI_TIMEOUT) as session:
@@ -191,9 +203,12 @@ async def run_agent(
                     if finish_reason in ("SAFETY", "RECITATION"):
                         logger.warning("Gemini blocked response: finishReason=%s", finish_reason)
                         return (
-                            "⚠️ Gemini từ chối trả lời do chính sách an toàn nội dung."
-                            if finish_reason == "SAFETY"
-                            else "⚠️ Gemini từ chối trả lời do nội dung vi phạm bản quyền."
+                            (
+                                "⚠️ Gemini từ chối trả lời do chính sách an toàn nội dung."
+                                if finish_reason == "SAFETY"
+                                else "⚠️ Gemini từ chối trả lời do nội dung vi phạm bản quyền."
+                            ),
+                            model_name,
                         )
 
                     try:
@@ -208,7 +223,7 @@ async def run_agent(
 
                     if not fn_calls:
                         text = "\n".join(text_parts).strip()
-                        return text or "🤔 (no response)"
+                        return text or "🤔 (no response)", model_name
 
                     # Execute all requested tools
                     fn_responses = []
@@ -231,7 +246,7 @@ async def run_agent(
                         "parts": fn_responses,
                     })
 
-    return "❌ Tất cả API key và model đều không phản hồi. Vui lòng thử lại."
+    return "❌ Tất cả API key và model đều không phản hồi. Vui lòng thử lại.", None
 
 
 # ── Follow-up question generator ─────────────────────────────────────────
@@ -261,7 +276,7 @@ async def generate_followup(
         sys = "Generate concise, natural follow-up questions in English."
 
     try:
-        result = await run_agent(
+        result, _used_model = await run_agent(
             tg_ctx        = None,
             user_text     = prompt,
             history       = history[-6:],

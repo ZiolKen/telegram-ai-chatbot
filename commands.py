@@ -720,24 +720,35 @@ async def cmd_sysreset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_model(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _owner_only(update):
         return
-    cid     = _get_conv_id(update)
-    current = state.get_cfg(cid).get("model", DEFAULT_MODEL)
-    args    = (update.message.text or "").split()[1:]
+    cid       = _get_conv_id(update)
+    cfg       = state.get_cfg(cid)
+    current   = cfg.get("model", DEFAULT_MODEL)
+    last_used = cfg.get("last_used_model")  # model THỰC SỰ trả lời gần nhất (có thể khác `current` do auto fallback)
+    args      = (update.message.text or "").split()[1:]
 
     if args and args[0] in MODELS:
-        state.set_cfg(cid, model=args[0])
+        # Chọn thủ công → xoá fallback cũ, tránh hiện cảnh báo lỗi thời
+        state.set_cfg(cid, model=args[0], last_used_model=None)
         await _reply(update, t("model.switched", _lang(update), label=_MODEL_LABELS.get(args[0], args[0])))
         return
 
+    lang = _lang(update)
     buttons = [
         [InlineKeyboardButton(
-            ("✅ " if m == current else "") + _MODEL_LABELS.get(m, m),
+            ("✅ " if m == current else "⚡ " if m == last_used else "") + _MODEL_LABELS.get(m, m),
             callback_data=f"setmodel:{m}",
         )]
         for m in MODELS
     ]
+    header = t("model.current", lang, model=current)
+    if last_used and last_used != current:
+        header += "\n\n" + t(
+            "model.fallback_note", lang,
+            configured=_MODEL_LABELS.get(current, current),
+            actual=_MODEL_LABELS.get(last_used, last_used),
+        )
     await update.message.reply_text(
-        t("model.current", _lang(update), model=current),
+        header,
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="HTML",
     )
@@ -777,6 +788,14 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     label = _MODEL_LABELS.get(model, model)
 
     lang    = _lang(update)
+    last_used = cfg.get("last_used_model")
+    if last_used and last_used != model:
+        model_line = t(
+            "status.model_fallback", lang,
+            actual=_MODEL_LABELS.get(last_used, last_used), configured=label,
+        )
+    else:
+        model_line = f"{t('status.model', lang)}  : <b>{label}</b>"
     db_info = await db.stats()
     if db_info.get("ready"):
         cr, mr = db_info["conv_rows"], db_info["max_conv_rows"]
@@ -829,7 +848,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t('status.title', lang)}\n\n"
         f"{t('status.conv', lang)}   : <code>{cid}</code>\n"
         f"{t('status.history', lang)}: {msgs_str}\n"
-        f"{t('status.model', lang)}  : <b>{label}</b>\n"
+        f"{model_line}\n"
         f"{key_line}\n"
         f"{wh_line}\n"
         f"{se_line}\n"
