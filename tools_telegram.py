@@ -227,7 +227,7 @@ TG_TOOL_DECLS = [
         "parameters": {
             "type": "OBJECT",
             "properties": {
-                "user_id": {"type": "STRING", "description": "Telegram user ID (number) or @username." + " Bot auto-resolves @username if it has seen that user before; use tg_resolve_user to check first if unsure."},
+                "user_id": {"type": "STRING", "description": "Telegram user ID (number) or exact @username." + " Bot auto-resolves @username if it has seen that user before — pass it straight through if you already have it. Use tg_search_user first if you only have a name/nickname, or tg_resolve_user to double-check an exact @username before a sensitive action."},
                 "chat_id": {"type": "STRING", "description": "Chat ID (default: current)"},
                 "reason":  {"type": "STRING", "description": "Ban reason (optional, shown in audit log)"},
             },
@@ -1236,10 +1236,12 @@ TG_TOOL_DECLS.extend([
     {
         "name": "tg_resolve_user",
         "description": (
-            "Tra numeric Telegram user ID từ @username (hoặc link t.me/username, "
-            "tg://user?id=...). Dùng khi cần xác nhận user_id trước khi "
-            "ban/mute/warn/promote/... hoặc khi muốn báo lỗi rõ ràng nếu bot "
-            "chưa từng thấy user đó (thay vì để hành động thất bại). "
+            "Tra numeric Telegram user ID từ @username CHÍNH XÁC (hoặc link t.me/username, "
+            "tg://user?id=...) — dùng khi đã biết đúng username nhưng muốn xác nhận trước khi "
+            "ban/mute/warn/promote/... hoặc muốn báo lỗi rõ ràng nếu bot chưa từng thấy user đó "
+            "(thay vì để hành động thất bại). KHÔNG cần gọi tool này nếu chỉ định làm hành động "
+            "bình thường — các tool ban/mute/... đã tự resolve @username sẵn, gọi thẳng cho nhanh. "
+            "Nếu chỉ có TÊN/nickname (không phải @username), dùng tg_search_user thay vì tool này. "
             "Resolve được nếu: bot đã từng thấy tin nhắn/mention/join-leave của "
             "user này, HOẶC user đó hiện là admin của chat hiện tại."
         ),
@@ -1249,6 +1251,28 @@ TG_TOOL_DECLS.extend([
                 "username": {"type": "STRING", "description": "@username, username, hoặc link t.me/username / tg://user?id=..."},
             },
             "required": ["username"],
+        },
+    },
+    {
+        "name": "tg_search_user",
+        "description": (
+            "Tìm user_id bằng cách search GẦN ĐÚNG theo tên hiển thị hoặc username "
+            "trong danh bạ user mà bot đã học được — dùng khi Owner chỉ nhắc tới ai đó "
+            "bằng tên/nickname (vd: 'ban thằng Minh', 'mute con bé kia', 'tìm user tên Anna') "
+            "thay vì @username chính xác hoặc numeric ID. Trả về danh sách candidate gồm "
+            "user_id, username, tên. Nếu có NHIỀU kết quả trùng khớp, hãy hỏi lại Owner để "
+            "xác nhận đúng người trước khi thực hiện hành động (ban/mute/promote/...). Nếu "
+            "chỉ có 1 kết quả khớp rõ ràng thì dùng luôn, không cần hỏi lại. Chỉ tìm được "
+            "trong số user bot đã từng thấy tin nhắn/mention/admin-list — không tìm được "
+            "user hoàn toàn xa lạ chưa từng xuất hiện."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "query": {"type": "STRING", "description": "Tên hoặc username (một phần cũng được) cần tìm."},
+                "limit": {"type": "NUMBER", "description": "Số kết quả tối đa trả về (mặc định 8)."},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -1372,6 +1396,25 @@ async def tg_resolve_user(ctx: TelegramContext, username: str) -> str:
     return t("tools.resolved_user", ctx.lang, handle=handle, uid=uid, extra=extra)
 
 
+async def tg_search_user(ctx: TelegramContext, query: str, limit: int = 8) -> str:
+    q = str(query).strip()
+    if not q:
+        return t("tools.search_user_missing_query", ctx.lang)
+    try:
+        lim = int(limit) if limit else 8
+    except (TypeError, ValueError):
+        lim = 8
+    results = state.search_users(q, limit=max(1, min(lim, 20)))
+    if not results:
+        return t("tools.search_user_no_match", ctx.lang, query=q)
+    lines = [t("tools.search_user_header", ctx.lang, query=q, n=len(results))]
+    for r in results:
+        uname = f"@{r['username']}" if r["username"] else "—"
+        name  = r["name"] or "—"
+        lines.append(f"• ID {r['user_id']} — {uname} — {name}")
+    return "\n".join(lines)
+
+
 async def tg_send_media_group(ctx: TelegramContext, media: list,
                                chat_id=None, thread_id=None) -> str:
     target = _resolve_chat(ctx, chat_id)
@@ -1453,6 +1496,7 @@ TG_HANDLERS["tg_leave_chat"]        = tg_leave_chat
 TG_HANDLERS["tg_create_invite_link"]= tg_create_invite_link
 TG_HANDLERS["tg_invite_user"]       = tg_invite_user
 TG_HANDLERS["tg_resolve_user"]      = tg_resolve_user
+TG_HANDLERS["tg_search_user"]       = tg_search_user
 TG_HANDLERS["tg_send_media_group"]  = tg_send_media_group
 TG_HANDLERS["tg_get_user_info"]     = tg_get_user_info
 TG_HANDLERS["tg_set_user_title"]    = tg_set_user_title
@@ -1461,6 +1505,7 @@ TOOL_STATUS["tg_leave_chat"] = "tool_status.tg_leave_chat"
 TOOL_STATUS["tg_create_invite_link"] = "tool_status.tg_create_invite_link"
 TOOL_STATUS["tg_invite_user"] = "tool_status.tg_invite_user"
 TOOL_STATUS["tg_resolve_user"] = "tool_status.tg_resolve_user"
+TOOL_STATUS["tg_search_user"] = "tool_status.tg_search_user"
 TOOL_STATUS["tg_send_media_group"] = "tool_status.tg_send_media_group"
 TOOL_STATUS["tg_get_user_info"] = "tool_status.tg_get_user_info"
 TOOL_STATUS["tg_set_user_title"] = "tool_status.tg_set_user_title"

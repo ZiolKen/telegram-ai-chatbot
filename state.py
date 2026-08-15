@@ -202,6 +202,50 @@ def search_similar_usernames(handle: str, limit: int = 5) -> list[str]:
     return ordered[:limit]
 
 
+def search_users(query: str, limit: int = 8) -> list[dict]:
+    """Search the locally-learned user directory by partial USERNAME or
+    partial NAME (case-insensitive substring match). O(n) scan over the
+    in-memory directory — n is the count of users the bot has ever seen,
+    so this stays fast (sub-millisecond) even with thousands of entries.
+
+    Used by the tg_search_user tool so the AI can find a user_id when it
+    only has a display name / nickname (not an exact @username) — e.g.
+    Owner says "ban thằng Minh" instead of "@minh123".
+
+    Returns a list of {"user_id", "username", "name"} dicts, ranked:
+    exact username match > username starts-with > name starts-with >
+    substring match anywhere in username or name.
+    """
+    q = query.strip().lstrip("@").lower()
+    if not q or not _user_directory:
+        return []
+
+    exact: list[dict] = []
+    uname_prefix: list[dict] = []
+    name_prefix: list[dict] = []
+    contains: list[dict] = []
+
+    for uid, info in _user_directory.items():
+        uname    = info.get("username") or ""
+        name     = info.get("name") or ""
+        uname_lc = uname.lower()
+        name_lc  = name.lower()
+        if not uname_lc and not name_lc:
+            continue
+        entry = {"user_id": uid, "username": uname, "name": name}
+        if uname_lc == q:
+            exact.append(entry)
+        elif uname_lc.startswith(q):
+            uname_prefix.append(entry)
+        elif name_lc.startswith(q):
+            name_prefix.append(entry)
+        elif q in uname_lc or q in name_lc:
+            contains.append(entry)
+
+    ordered = exact + uname_prefix + name_prefix + contains
+    return ordered[: max(1, limit)]
+
+
 def known_user_count() -> int:
     return len(_user_directory)
 

@@ -207,6 +207,9 @@ _T: dict[str, dict[str, str]] = {
         "tools.user_not_found_hint":  " Did you mean: {suggestions}?",
         "tools.resolve_missing_username": "❌ Missing username to look up.",
         "tools.resolved_user":        "✅ @{handle} → user_id: {uid}{extra}",
+        "tools.search_user_missing_query": "❌ Missing name/username to search for.",
+        "tools.search_user_no_match": "❌ No user matching '{query}' found in the known-user directory. The bot only knows users it has seen a message/mention/join-leave from, or admins of the current chat.",
+        "tools.search_user_header":   "🔎 {n} match(es) for '{query}':",
         "tools.sent_message":        "✅ Message sent (ID {mid}) to {target}.",
         "tools.send_failed":         "❌ Failed to send: {err}",
         "tools.reacted":             "✅ Reacted {emoji} to message {mid}.",
@@ -329,6 +332,7 @@ _T: dict[str, dict[str, str]] = {
         "tool_status.tg_get_user_info":          "👤 Getting user info…",
         "tool_status.tg_set_user_title":         "🏷️ Setting title…",
         "tool_status.tg_resolve_user":           "🔎 Resolving user…",
+        "tool_status.tg_search_user":            "🔎 Searching user directory…",
 
         # Inbound file content (file_process.py / handlers._extract_media)
         "file.content_header":     "--- Content of file '{filename}' ---",
@@ -517,6 +521,9 @@ _T: dict[str, dict[str, str]] = {
         "tools.user_not_found_hint":  " Ý bạn có phải: {suggestions}?",
         "tools.resolve_missing_username": "❌ Thiếu username cần tra.",
         "tools.resolved_user":        "✅ @{handle} → user_id: {uid}{extra}",
+        "tools.search_user_missing_query": "❌ Thiếu tên/username cần tìm.",
+        "tools.search_user_no_match": "❌ Không tìm thấy user nào khớp với '{query}' trong danh bạ. Bot chỉ biết những user đã từng thấy tin nhắn/mention/join-leave, hoặc admin của chat hiện tại.",
+        "tools.search_user_header":   "🔎 {n} kết quả khớp với '{query}':",
         "tools.sent_message":        "✅ Đã gửi tin nhắn (ID {mid}) tới {target}.",
         "tools.send_failed":         "❌ Gửi thất bại: {err}",
         "tools.reacted":             "✅ Đã react {emoji} vào tin nhắn {mid}.",
@@ -639,6 +646,7 @@ _T: dict[str, dict[str, str]] = {
         "tool_status.tg_get_user_info":          "👤 Đang lấy thông tin user…",
         "tool_status.tg_set_user_title":         "🏷️ Đang đặt title…",
         "tool_status.tg_resolve_user":           "🔎 Đang tra user…",
+        "tool_status.tg_search_user":            "🔎 Đang tìm user trong danh bạ…",
 
         # Inbound file content (file_process.py / handlers._extract_media)
         "file.content_header":     "--- Nội dung file '{filename}' ---",
