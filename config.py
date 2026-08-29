@@ -23,6 +23,7 @@ GEMINI_KEYS: list[str] = [
 ]
 DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gemini-3.1-flash-lite")
 MODELS: list[str] = [
+    "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.5-flash",
