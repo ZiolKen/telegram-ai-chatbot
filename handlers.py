@@ -79,6 +79,7 @@ def _fq_get(key: str, idx: int) -> str | None:
 # Model label map
 # ─────────────────────────────────────────────────────────────
 _MODEL_LABELS: dict[str, str] = {
+    "gemini-3.7-flash":                    "3.7 Flash ⚜️",
     "gemini-3.6-flash":                    "3.6 Flash 🔰",
     "gemini-3.5-flash-lite":               "3.5 Flash Lite 💠",
     "gemini-3.1-flash-lite":               "3.1 Flash Lite ⚡",
