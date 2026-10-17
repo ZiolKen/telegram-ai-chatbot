@@ -16,11 +16,16 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 from time import monotonic
+import random
+import re
 from typing import Callable, Optional
 
 import aiohttp
 
-from config import DEFAULT_LANG, DEFAULT_MODEL, GEMINI_KEYS, MODELS
+from config import (
+    DEFAULT_LANG, DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ENABLE_GROUNDING,
+    GEMINI_KEYS, GEMINI_TIMEOUT_SECONDS, MODELS,
+)
 from tools_code import CODE_TOOL_DECLS, run_python
 from tools_telegram import TG_TOOL_DECLS, TG_HANDLERS, TelegramContext
 from tools_web import WEB_TOOL_DECLS, arxiv_search, fetch_url, web_search
@@ -29,10 +34,32 @@ logger = logging.getLogger(__name__)
 
 ALL_TOOL_DECLS = WEB_TOOL_DECLS + CODE_TOOL_DECLS + TG_TOOL_DECLS
 
-MAX_TOOL_ROUNDS      = 12
+MAX_TOOL_ROUNDS       = 12
 MAX_TOOL_RESULT_CHARS = 4000   # #12 — trim tool results
-GEMINI_TIMEOUT       = aiohttp.ClientTimeout(total=90)
-BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+BASE_URL              = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# ── Shared ClientSession lifecycle ─────────────────────────────────────────
+_shared_session: Optional[aiohttp.ClientSession] = None
+
+
+async def get_session() -> aiohttp.ClientSession:
+    """Return a shared, persistent ClientSession with connection pooling."""
+    global _shared_session
+    if _shared_session is None or _shared_session.closed:
+        connector = aiohttp.TCPConnector(limit=20, keepalive_timeout=30)
+        _shared_session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=GEMINI_TIMEOUT_SECONDS),
+        )
+    return _shared_session
+
+
+async def close_session() -> None:
+    """Gracefully close the shared session on application shutdown."""
+    global _shared_session
+    if _shared_session and not _shared_session.closed:
+        await _shared_session.close()
+        _shared_session = None
 
 
 # ── Per-key quota cooldown tracker (#11) ─────────────────────────────────
@@ -53,49 +80,147 @@ def _mark_quota_exhausted(api_key: str, model: str):
     _exhausted[f"{api_key[:12]}:{model}"] = monotonic() + _QUOTA_COOLDOWN
 
 
+# ── Thinking Config & Payload Builder ─────────────────────────────────────
+def _build_generation_config(model: str, thinking_level: str) -> dict:
+    gen_config: dict = {
+        "temperature": 0.7,
+        "maxOutputTokens": 8192,
+    }
+    level = (thinking_level or "medium").lower()
+    if level not in ("low", "medium", "high"):
+        level = "medium"
+
+    if model.startswith("gemini-3"):
+        # Gemini 3.x uses thinkingLevel: LOW | MEDIUM | HIGH
+        gen_config["thinkingConfig"] = {"thinkingLevel": level.upper()}
+    elif model.startswith("gemini-2.5"):
+        # Gemini 2.5 uses thinkingBudget (0 = disabled, -1 = auto, 8192 = high)
+        budget_map = {"low": 0, "medium": -1, "high": 8192}
+        gen_config["thinkingConfig"] = {"thinkingBudget": budget_map.get(level, -1)}
+
+    return gen_config
+
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _builtin_tools_wanted(tools: Optional[list], model: str, enable_grounding: bool) -> bool:
+    """Google Search chỉ được ghép với function calling trên Gemini 3.x;
+    các model khác chỉ bật grounding khi KHÔNG có function declarations."""
+    if not enable_grounding:
+        return False
+    return (not tools) or model.startswith("gemini-3")
+
+
+def _build_tools_payload(tools: Optional[list], model: str, enable_grounding: bool,
+                         want_url_context: bool = False,
+                         use_builtin: bool = True) -> tuple[Optional[list], Optional[dict]]:
+    tool_list = []
+    if tools:
+        tool_list.append({"function_declarations": tools})
+    if use_builtin and _builtin_tools_wanted(tools, model, enable_grounding):
+        tool_list.append({"googleSearch": {}})
+        if want_url_context:
+            tool_list.append({"urlContext": {}})      # Gemini tự đọc link người dùng gửi
+
+    if not tool_list:
+        return None, None
+
+    config = {"function_calling_config": {"mode": "AUTO"}} if tools else None
+    return tool_list, config
+
+
+def _collect_sources(candidate: dict, sources_out: Optional[list]) -> None:
+    """Gom nguồn thật mà Gemini đã dùng khi grounding (groundingMetadata.groundingChunks)."""
+    if sources_out is None:
+        return
+    try:
+        chunks = (candidate.get("groundingMetadata") or {}).get("groundingChunks") or []
+        seen = {x["url"] for x in sources_out}
+        for c in chunks:
+            web = c.get("web") or {}
+            uri = web.get("uri")
+            if uri and uri not in seen:
+                seen.add(uri)
+                sources_out.append({"title": web.get("title") or "", "url": uri})
+    except Exception:
+        pass
+
+
 # ── Low-level Gemini call ─────────────────────────────────────────────────
 async def _gemini(
-    session:       aiohttp.ClientSession,
-    api_key:       str,
-    model:         str,
-    contents:      list[dict],
-    system_prompt: str,
-    tools:         Optional[list],
+    session:          aiohttp.ClientSession,
+    api_key:          str,
+    model:            str,
+    contents:         list[dict],
+    system_prompt:    str,
+    tools:            Optional[list],
+    thinking_level:   str = "medium",
+    enable_grounding: bool = False,
+    want_url_context: bool = False,
 ) -> dict | None:
-    """Single Gemini API call. Returns response dict or None on failure."""
+    """Single Gemini API call with exponential backoff for transient errors."""
     url = f"{BASE_URL}/{model}:generateContent?key={api_key}"
     payload: dict = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 8192,
-        },
+        "generationConfig": _build_generation_config(model, thinking_level),
     }
-    if tools:
-        payload["tools"]       = [{"function_declarations": tools}]
-        payload["tool_config"] = {"function_calling_config": {"mode": "AUTO"}}
 
-    try:
-        async with session.post(url, json=payload) as r:
-            if r.status == 200:
-                return await r.json()
-            if r.status == 429:
-                logger.warning("Rate-limit: key=%.8s model=%s", api_key, model)
-                _mark_quota_exhausted(api_key, model)   # #11
+    use_builtin = _builtin_tools_wanted(tools, model, enable_grounding)
+
+    def _apply_tools() -> None:
+        payload.pop("tools", None)
+        payload.pop("tool_config", None)
+        tp, tc = _build_tools_payload(tools, model, enable_grounding, want_url_context, use_builtin)
+        if tp:
+            payload["tools"] = tp
+        if tc:
+            payload["tool_config"] = tc
+
+    _apply_tools()
+
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            async with session.post(url, json=payload) as r:
+                if r.status == 200:
+                    return await r.json()
+                if r.status == 429:
+                    logger.warning("Rate-limit: key=%.8s model=%s", api_key, model)
+                    _mark_quota_exhausted(api_key, model)   # #11
+                    return None
+                if r.status == 404:
+                    logger.warning("Model not found: %s", model)
+                    return {"_skip_model": True}
+                if r.status in (500, 502, 503, 504) and attempt < max_retries:
+                    backoff = (1.5 ** attempt) + random.uniform(0.1, 0.4)
+                    logger.warning("Gemini transient %d [%s] — retry in %.1fs (attempt %d/%d)", r.status, model, backoff, attempt + 1, max_retries)
+                    await asyncio.sleep(backoff)
+                    continue
+                body = await r.text()
+                if r.status == 400 and use_builtin:
+                    # Model/API không chấp nhận googleSearch/urlContext (hoặc ghép với function
+                    # calling) → thử lại CÙNG model nhưng không dùng grounding.
+                    logger.warning("Gemini 400 with grounding [%s] — retry without: %s", model, body[:160])
+                    use_builtin = False
+                    _apply_tools()
+                    continue
+                logger.error("Gemini %s [%s]: %s", r.status, model, body[:200])
                 return None
-            if r.status == 404:
-                logger.warning("Model not found: %s", model)
-                return {"_skip_model": True}
-            body = await r.text()
-            logger.error("Gemini %s [%s]: %s", r.status, model, body[:200])
+        except asyncio.TimeoutError:
+            # Do not retry timeouts (each can take up to GEMINI_TIMEOUT_SECONDS);
+            # let the caller fall through to the next model/key instead.
+            logger.warning("Gemini timeout [%s] — skipping", model)
             return None
-    except asyncio.TimeoutError:
-        logger.warning("Timeout: %s", model)
-        return None
-    except Exception as e:
-        logger.error("Network error calling Gemini: %s", e)
-        return None
+        except Exception as e:
+            if attempt < max_retries:
+                logger.warning("Gemini network error [%s]: %s — retrying", model, e)
+                await asyncio.sleep(1.0)
+                continue
+            logger.error("Network error calling Gemini: %s", e)
+            return None
+    return None
 
 
 # ── Tool dispatcher ───────────────────────────────────────────────────────
@@ -142,14 +267,17 @@ async def _dispatch(
 
 # ── Main agent loop ───────────────────────────────────────────────────────
 async def run_agent(
-    tg_ctx:        Optional[TelegramContext],
-    user_text:     str,
-    history:       list[dict],
-    system_prompt: str,
-    model:         Optional[str] = None,
-    use_plugins:   bool = True,
-    status_cb:     Optional[Callable] = None,
-    media_parts:   Optional[list[dict]] = None,
+    tg_ctx:           Optional[TelegramContext],
+    user_text:        str,
+    history:          list[dict],
+    system_prompt:    str,
+    model:            Optional[str] = None,
+    use_plugins:      bool = True,
+    status_cb:        Optional[Callable] = None,
+    media_parts:      Optional[list[dict]] = None,
+    thinking_level:   Optional[str] = None,
+    enable_grounding: Optional[bool] = None,
+    sources_out:      Optional[list] = None,
 ) -> tuple[str, Optional[str]]:
     """
     Drive a Gemini conversation with full multi-turn tool use.
@@ -161,106 +289,114 @@ async def run_agent(
     /status, /model) so the fallback isn't invisible to the owner.
     It's None only in the total-failure path (no key/model responded at all).
 
-    media_parts: các inlineData part (ảnh/audio/video/PDF đã base64-hoá,
-    xem file_process.py) được đính kèm thẳng vào lượt user hiện tại — Gemini
-    tự đọc nội dung thay vì chỉ thấy tên file trong text.
+    media_parts: inlineData parts (base64 image/audio/video/PDF, see
+    file_process.py) attached to the current user turn so Gemini reads the
+    content itself instead of just seeing the filename.
     """
     preferred  = model or DEFAULT_MODEL
     model_list = [preferred] + [m for m in MODELS if m != preferred]
     tools      = ALL_TOOL_DECLS if use_plugins else None
+    th_level   = thinking_level or DEFAULT_THINKING_LEVEL
+    grounding  = enable_grounding if enable_grounding is not None else ENABLE_GROUNDING
 
+    want_url   = bool(_URL_RE.search(user_text or ""))
     user_parts = [{"text": user_text}] + list(media_parts or [])
     base_contents = list(history) + [
         {"role": "user", "parts": user_parts}
     ]
 
-    async with aiohttp.ClientSession(timeout=GEMINI_TIMEOUT) as session:
-        for api_key in GEMINI_KEYS:
-            for model_name in model_list:
-                # Skip rate-limited keys (#11)
-                if not _is_quota_ok(api_key, model_name):
-                    logger.debug("Skip exhausted: key=%.8s model=%s", api_key, model_name)
-                    continue
+    session = await get_session()
+    for api_key in GEMINI_KEYS:
+        for model_name in model_list:
+            # Skip rate-limited keys (#11)
+            if not _is_quota_ok(api_key, model_name):
+                logger.debug("Skip exhausted: key=%.8s model=%s", api_key, model_name)
+                continue
 
-                contents = list(base_contents)
+            contents = list(base_contents)
 
-                for _round in range(MAX_TOOL_ROUNDS):
-                    resp = await _gemini(
-                        session, api_key, model_name,
-                        contents, system_prompt, tools,
+            for _round in range(MAX_TOOL_ROUNDS):
+                resp = await _gemini(
+                    session, api_key, model_name,
+                    contents, system_prompt, tools,
+                    thinking_level=th_level,
+                    enable_grounding=grounding,
+                    want_url_context=want_url,
+                )
+                if resp is None:
+                    break       # try next model
+                if resp.get("_skip_model"):
+                    break       # model 404 — try next
+
+                try:
+                    candidate = resp["candidates"][0]
+                except IndexError:
+                    logger.error("Gemini: empty candidates list — %s", str(resp)[:200])
+                    break
+
+                _collect_sources(candidate, sources_out)
+
+                # Detect safety/recitation blocks before accessing 'content'
+                finish_reason = candidate.get("finishReason", "")
+                if finish_reason in ("SAFETY", "RECITATION"):
+                    logger.warning("Gemini blocked response: finishReason=%s", finish_reason)
+                    return (
+                        (
+                            "⚠️ Gemini từ chối trả lời do chính sách an toàn nội dung."
+                            if finish_reason == "SAFETY"
+                            else "⚠️ Gemini từ chối trả lời do nội dung vi phạm bản quyền."
+                        ),
+                        model_name,
                     )
-                    if resp is None:
-                        break       # try next model
-                    if resp.get("_skip_model"):
-                        break       # model 404 — try next
 
-                    try:
-                        candidate = resp["candidates"][0]
-                    except IndexError:
-                        logger.error("Gemini: empty candidates list — %s", str(resp)[:200])
-                        break
+                try:
+                    content = candidate["content"]
+                    parts   = content.get("parts", [])
+                except KeyError:
+                    logger.error("Gemini: no 'content' in candidate — %s", str(candidate)[:200])
+                    break
 
-                    # Detect safety/recitation blocks before accessing 'content'
-                    finish_reason = candidate.get("finishReason", "")
-                    if finish_reason in ("SAFETY", "RECITATION"):
-                        logger.warning("Gemini blocked response: finishReason=%s", finish_reason)
-                        return (
-                            (
-                                "⚠️ Gemini từ chối trả lời do chính sách an toàn nội dung."
-                                if finish_reason == "SAFETY"
-                                else "⚠️ Gemini từ chối trả lời do nội dung vi phạm bản quyền."
-                            ),
-                            model_name,
-                        )
+                fn_calls   = [p for p in parts if "functionCall" in p]
+                text_parts = [p.get("text", "") for p in parts if "text" in p]
 
-                    try:
-                        content = candidate["content"]
-                        parts   = content.get("parts", [])
-                    except KeyError:
-                        logger.error("Gemini: no 'content' in candidate — %s", str(candidate)[:200])
-                        break
+                if not fn_calls:
+                    text = "\n".join(text_parts).strip()
+                    return text or "🤔 (no response)", model_name
 
-                    fn_calls   = [p for p in parts if "functionCall" in p]
-                    text_parts = [p.get("text", "") for p in parts if "text" in p]
+                # Execute all requested tools CONCURRENTLY (#speed).
+                # Tool calls returned in the same round come from a single
+                # model turn with no visibility into each other's output,
+                # so they're independent — running them in parallel with
+                # asyncio.gather cuts total latency roughly to the slowest
+                # single call instead of the sum of all of them (huge win
+                # when the model fires off e.g. 3 web_search / tg_* calls
+                # at once). _dispatch() already catches its own exceptions
+                # and returns an error string, so gather() never raises.
+                async def _run_tool(fc_part: dict) -> tuple[str, str]:
+                    fc      = fc_part["functionCall"]
+                    fn_name = fc["name"]
+                    fn_args = fc.get("args") or {}
+                    logger.info("Tool call: %s(%s)", fn_name, str(fn_args)[:120])
+                    result = await _dispatch(fn_name, fn_args, tg_ctx, status_cb)
+                    return fn_name, result
 
-                    if not fn_calls:
-                        text = "\n".join(text_parts).strip()
-                        return text or "🤔 (no response)", model_name
+                tool_results = await asyncio.gather(*(_run_tool(fc) for fc in fn_calls))
 
-                    # Execute all requested tools CONCURRENTLY (#speed).
-                    # Tool calls returned in the same round come from a single
-                    # model turn with no visibility into each other's output,
-                    # so they're independent — running them in parallel with
-                    # asyncio.gather cuts total latency roughly to the slowest
-                    # single call instead of the sum of all of them (huge win
-                    # when the model fires off e.g. 3 web_search / tg_* calls
-                    # at once). _dispatch() already catches its own exceptions
-                    # and returns an error string, so gather() never raises.
-                    async def _run_tool(fc_part: dict) -> tuple[str, str]:
-                        fc      = fc_part["functionCall"]
-                        fn_name = fc["name"]
-                        fn_args = fc.get("args") or {}
-                        logger.info("Tool call: %s(%s)", fn_name, str(fn_args)[:120])
-                        result = await _dispatch(fn_name, fn_args, tg_ctx, status_cb)
-                        return fn_name, result
-
-                    tool_results = await asyncio.gather(*(_run_tool(fc) for fc in fn_calls))
-
-                    fn_responses = [
-                        {
-                            "functionResponse": {
-                                "name":     fn_name,
-                                "response": {"result": result},
-                            }
+                fn_responses = [
+                    {
+                        "functionResponse": {
+                            "name":     fn_name,
+                            "response": {"result": result},
                         }
-                        for fn_name, result in tool_results
-                    ]
+                    }
+                    for fn_name, result in tool_results
+                ]
 
-                    contents.append(content)
-                    contents.append({
-                        "role":  "user",
-                        "parts": fn_responses,
-                    })
+                contents.append(content)
+                contents.append({
+                    "role":  "user",
+                    "parts": fn_responses,
+                })
 
     return "❌ Tất cả API key và model đều không phản hồi. Vui lòng thử lại.", None
 
@@ -298,6 +434,7 @@ async def generate_followup(
             history       = history[-6:],
             system_prompt = sys,
             use_plugins   = False,
+            enable_grounding = False,
         )
         qs = [q.strip() for q in result.splitlines() if q.strip()]
         return qs[:count]

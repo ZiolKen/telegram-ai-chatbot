@@ -34,17 +34,20 @@ import utils
 import file_process
 from agent import build_system_prompt, generate_followup, run_agent
 from i18n import t
+import config
+import bot_identity
 from config import DEFAULT_LANG
 from config import (
     ENABLE_FOLLOWUP,
     ENABLE_PLUGINS,
     FOLLOWUP_COUNT,
-    GROUP_CONTEXT_ENABLED,
     MESSAGE_MERGE_DELAY,
     MODELS,
     OWNER_ID,
 )
 from tools_telegram import TelegramContext, TOOL_STATUS, tool_status_text
+import group_context
+import monitor_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -265,10 +268,11 @@ async def _send_chunks(
     sent:   list[Message] = []
     for i, chunk in enumerate(chunks):
         kb = keyboard if (i == len(chunks) - 1) else None
+        html_text = utils.md_to_html(chunk)
         try:
             msg = await bot.send_message(
                 chat_id             = chat_id,
-                text                = utils.md_to_html(chunk),
+                text                = html_text,
                 parse_mode          = "HTML",
                 message_thread_id   = thread_id,
                 reply_to_message_id = reply_to_id if i == 0 else None,
@@ -276,7 +280,19 @@ async def _send_chunks(
             )
             sent.append(msg)
         except Exception as e:
-            logger.error("send_chunks: %s", e)
+            logger.warning("send_chunks: HTML send failed (%s), falling back to plain text", e)
+            try:
+                msg = await bot.send_message(
+                    chat_id             = chat_id,
+                    text                = chunk,
+                    parse_mode          = None,
+                    message_thread_id   = thread_id,
+                    reply_to_message_id = reply_to_id if i == 0 else None,
+                    reply_markup        = kb,
+                )
+                sent.append(msg)
+            except Exception as e2:
+                logger.error("send_chunks fatal error sending message: %s", e2)
     return sent
 
 
@@ -318,6 +334,7 @@ async def _process(
     text:        str,
     reply_to_id: Optional[int] = None,
     media_parts: Optional[list[dict]] = None,
+    orig_msg:    Optional[Message] = None,
 ):
     cid         = state.conv_id(chat_id, user_id, thread_id, is_private,
                                 state.topic_mode(chat_id))
@@ -330,6 +347,22 @@ async def _process(
     tg_ctx        = _make_tg_ctx(bot, chat_id, user_id, message_id,
                                  thread_id, chat_title, user_name, lang)
     system_prompt = custom_sys or build_system_prompt(tg_ctx, lang=lang)
+
+    # ── Group Context injection ───────────────────────────────
+    if not is_private and orig_msg is not None:
+        await group_context.ensure_loaded(chat_id)
+        bot_uname = bot.username or ""
+        group_ctx_block = group_context.build_group_ai_context(orig_msg, chat_id, bot_uname, lang=lang)
+        system_prompt += group_ctx_block
+
+    # ── [TAG FIX] Xác định người cần nhắc tới do HỆ THỐNG tính, không phó mặc cho AI ──
+    target = None
+    if not is_private and orig_msg is not None:
+        target = group_context.resolve_ai_target(orig_msg)
+        if target:
+            system_prompt += group_context.target_prompt_block(target, lang)
+
+    await state.ensure_history(cid)
     history       = state.get_history(cid)
 
     status_msg: Optional[Message] = None
@@ -353,16 +386,20 @@ async def _process(
     typing_task = asyncio.create_task(_keep_typing(bot, chat_id, thread_id))
 
     used_model: Optional[str] = None
+    sources: list = []
     try:
         response, used_model = await run_agent(
-            tg_ctx        = tg_ctx,
-            user_text     = text,
-            history       = history,
-            system_prompt = system_prompt,
-            model         = model_pref,
-            use_plugins   = use_plugins,
-            status_cb     = status_cb,
-            media_parts   = media_parts,
+            tg_ctx           = tg_ctx,
+            user_text        = text,
+            history          = history,
+            system_prompt    = system_prompt,
+            model            = model_pref,
+            use_plugins      = use_plugins,
+            status_cb        = status_cb,
+            media_parts      = media_parts,
+            thinking_level   = cfg.get("thinking"),
+            enable_grounding = cfg.get("grounding"),
+            sources_out      = sources,
         )
     except Exception as e:
         logger.error("run_agent error: %s", e, exc_info=True)
@@ -381,12 +418,30 @@ async def _process(
     if used_model:
         state.set_cfg(cid, last_used_model=used_model)
 
+    # [TAG FIX] Hậu xử lý: ép tag đúng @username + reply thẳng vào tin của họ.
+    if target:
+        if target.get("username"):
+            tag = "@" + target["username"]
+            if tag.lower() not in response.lower():
+                response = f"{tag} {response}"
+        if target.get("target_msg_id"):
+            reply_to_id = target["target_msg_id"]
+
+    # Nguồn grounding (tùy chọn, /grounding src on)
+    if sources and cfg.get("grounding_sources"):
+        head = "📎 Nguồn" if lang == "vi" else "📎 Sources"
+        lines = [f"{i}. {(x['title'] or x['url'])[:80]} — {x['url']}" for i, x in enumerate(sources[:5], 1)]
+        response = response + f"\n\n{head}:\n" + "\n".join(lines)
+
     # Lưu lịch sử: dùng [Name]: text cho group để nhất quán với push_context
     user_entry = f"[{user_name}]: {text}" if not is_private else text
     state.push(cid, "user",  user_entry)
     state.push(cid, "model", response)
 
     sent = await _send_chunks(bot, chat_id, response, thread_id, reply_to_id)
+    if not is_private and sent:
+        for s in sent:
+            group_context.record_sent(s, bot.username or "")
 
     if ENABLE_FOLLOWUP and sent:
         asyncio.create_task(
@@ -401,6 +456,7 @@ async def _process(
 async def _delayed_dispatch(
     bot, accu_key, chat_id, user_id, message_id,
     thread_id, is_private, chat_title, user_name, reply_to_id,
+    orig_msg: Optional[Message] = None,
 ):
     try:
         await asyncio.sleep(MESSAGE_MERGE_DELAY)
@@ -411,7 +467,7 @@ async def _delayed_dispatch(
         merged = utils.merge(msgs)
         await _process(bot, chat_id, user_id, message_id, thread_id,
                        is_private, chat_title, user_name, merged, reply_to_id,
-                       media_parts=media)
+                       media_parts=media, orig_msg=orig_msg)
     finally:
         # Only drop our own task reference — a newer message may have
         # already replaced it with a fresh task in state.pending_tasks.
@@ -460,6 +516,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bot_username = context.bot.username
     is_private   = chat.type == ChatType.PRIVATE
+    is_owner     = (user.id == OWNER_ID)
+
+    # ── [GROUP CONTEXT] Ghi nhận mọi tin trong nhóm ───────────
+    if not is_private:
+        await group_context.record_incoming(msg)
+
+    # ── [MONITOR] Đẩy tin nhắn nhóm ra DM nếu bật Monitor ──────
+    if not is_private and not is_owner:
+        state._fire(monitor_proxy.push_group_monitor(
+            context.bot, msg, edited=update.edited_message is not None))
+
+    # ── [PROXY] Xử lý chuyển tiếp hai chiều nếu bật Proxy trong DM ──
+    if is_private and is_owner:
+        _is_feed_reply = (
+            msg.reply_to_message is not None
+            and state.feed_reply_peek(chat.id, msg.reply_to_message.message_id)
+        )
+        if not _is_feed_reply and await monitor_proxy.handle_proxy_relay(context.bot, msg):
+            return
 
     # ── Xác định xem có trigger AI không ──────────────────────
     is_reply_to_bot = (
@@ -469,13 +544,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     raw_text     = msg.text or msg.caption or ""
     is_mentioned = f"@{bot_username}" in raw_text
-    is_owner     = (user.id == OWNER_ID)
 
     # ── Auth: chỉ owner mới được interact ───────────────────────
     # Người khác → chỉ lưu context (nếu bật), không bao giờ reply
     if not is_owner:
         text = _extract_text(msg, bot_username)
-        if text is not None and not is_private and GROUP_CONTEXT_ENABLED:
+        if text is not None and not is_private and config.GROUP_CONTEXT_ENABLED:
             thread_id = getattr(msg, "message_thread_id", None)
             user_name = user.full_name or str(user.id)
             cid = state.conv_id(chat.id, user.id, thread_id, is_private,
@@ -541,7 +615,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_title  = getattr(chat, "title", None) or chat.effective_name or "Chat"
 
     # ── [CTX] Lưu context tin nhắn owner không trigger ────────
-    if not is_private and GROUP_CONTEXT_ENABLED and not should_respond:
+    if not is_private and config.GROUP_CONTEXT_ENABLED and not should_respond:
         cid = state.conv_id(chat.id, user.id, thread_id, is_private,
                             state.topic_mode(chat.id))
         state.push_context(cid, user_name, text)
@@ -593,9 +667,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot, accu_key,
             chat.id, user.id, msg.message_id,
             thread_id, is_private, chat_title, user_name, reply_to_id,
+            orig_msg=msg,
         )
     )
     state.pending_tasks[accu_key] = task
+
+
+async def handle_edited_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tin trong NHÓM bị sửa: cập nhật lịch sử + báo Monitor (nếu bật). Không kích hoạt AI."""
+    msg = update.edited_message
+    if not msg or msg.chat.type == ChatType.PRIVATE:
+        return
+    user = msg.from_user
+    if bot_identity.is_self_user(user):
+        return
+    await group_context.record_incoming(msg)
+    if user and user.id != OWNER_ID:
+        state._fire(monitor_proxy.push_group_monitor(context.bot, msg, edited=True))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -654,8 +742,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Feed actions ─────────────────────────────────────────
-    if data.startswith("fd:"):
+    # ── Thinking level selection ──────────────────────────────
+    if data.startswith("thinking:"):
+        choice = data[9:]
+        if choice in ("low", "medium", "high"):
+            thread_id = getattr(msg, "message_thread_id", None)
+            is_priv   = chat.type == ChatType.PRIVATE
+            cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,
+                                      state.topic_mode(chat.id))
+            state.set_cfg(cid, thinking=choice)
+            _lang = state.get_cfg(cid).get("lang", DEFAULT_LANG)
+            try:
+                text = (
+                    f"🧠 Mức suy luận đã chuyển sang <b>{choice.upper()}</b>."
+                    if _lang == "vi" else
+                    f"🧠 Thinking level switched to <b>{choice.upper()}</b>."
+                )
+                await query.edit_message_text(text, parse_mode="HTML")
+            except Exception:
+                pass
+            return
+
+    # ── Feed & Monitor actions ───────────────────────────────
+    if data.startswith("fd:") or data.startswith("mon:"):
         thread_id = getattr(msg, "message_thread_id", None)
         is_priv   = chat.type == ChatType.PRIVATE
         cid       = state.conv_id(chat.id, OWNER_ID, thread_id, is_priv,

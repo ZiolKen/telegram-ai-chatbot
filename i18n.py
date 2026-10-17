@@ -333,6 +333,10 @@ _T: dict[str, dict[str, str]] = {
         "tool_status.tg_set_user_title":         "🏷️ Setting title…",
         "tool_status.tg_resolve_user":           "🔎 Resolving user…",
         "tool_status.tg_search_user":            "🔎 Searching user directory…",
+        "tool_status.search_group_history":      "🔎 Searching group history…",
+        "tool_status.tg_purge_messages":         "🧹 Purging messages…",
+        "tool_status.tg_delete_last_n_messages": "🧹 Deleting recent messages…",
+        "tool_status.tg_purge_user_messages":    "🧹 Deleting member's messages…",
 
         # Inbound file content (file_process.py / handlers._extract_media)
         "file.content_header":     "--- Content of file '{filename}' ---",
@@ -647,6 +651,10 @@ _T: dict[str, dict[str, str]] = {
         "tool_status.tg_set_user_title":         "🏷️ Đang đặt title…",
         "tool_status.tg_resolve_user":           "🔎 Đang tra user…",
         "tool_status.tg_search_user":            "🔎 Đang tìm user trong danh bạ…",
+        "tool_status.search_group_history":      "🔎 Đang tra cứu lịch sử nhóm…",
+        "tool_status.tg_purge_messages":         "🧹 Đang dọn tin nhắn…",
+        "tool_status.tg_delete_last_n_messages": "🧹 Đang xóa các tin gần nhất…",
+        "tool_status.tg_purge_user_messages":    "🧹 Đang xóa tin của thành viên…",
 
         # Inbound file content (file_process.py / handlers._extract_media)
         "file.content_header":     "--- Nội dung file '{filename}' ---",

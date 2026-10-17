@@ -19,3 +19,6 @@ duckduckgo-search==6.2.4
 
 # ArXiv
 arxiv==2.1.0
+
+# Cryptography (Fernet)
+cryptography==46.0.6

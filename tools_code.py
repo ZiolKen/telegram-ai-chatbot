@@ -22,7 +22,6 @@ import asyncio
 import io as _io
 import logging
 import os
-import subprocess
 import sys
 import textwrap
 from datetime import datetime, timezone
@@ -156,19 +155,32 @@ async def run_python(code: str, tg_ctx: Optional["TelegramContext"] = None) -> s
     indented = textwrap.indent(code, "    ")
     script   = _WRAPPER.format(code=indented)
 
-    loop = asyncio.get_event_loop()
     try:
-        result: subprocess.CompletedProcess = await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                [sys.executable, "-c", script],
-                capture_output=True,
-                text=True,
-                timeout=_TIMEOUT_SECONDS,
-                env=_sandbox_env(),
-            ),
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=_sandbox_env(),
         )
-        full_output = (result.stdout or "") + (result.stderr or "")
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=_TIMEOUT_SECONDS,
+            )
+            full_output = (stdout_bytes.decode(errors="replace") if stdout_bytes else "") + \
+                          (stderr_bytes.decode(errors="replace") if stderr_bytes else "")
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            msg = f"❌ Code chạy quá {_TIMEOUT_SECONDS} giây, đã dừng."
+            if tg_ctx is not None:
+                await _mirror_to_owner(tg_ctx, code, msg)
+            return msg
+
         if not full_output.strip():
             full_output = "(không có output)"
 
@@ -178,12 +190,8 @@ async def run_python(code: str, tg_ctx: Optional["TelegramContext"] = None) -> s
         output = full_output
         if len(output) > 3500:
             output = output[:3500] + "\n…[output bị cắt bớt]"
-        return f"<pre><code>{output.rstrip()}</code></pre>"
-    except subprocess.TimeoutExpired:
-        msg = f"❌ Code chạy quá {_TIMEOUT_SECONDS} giây, đã dừng."
-        if tg_ctx is not None:
-            await _mirror_to_owner(tg_ctx, code, msg)
-        return msg
+        return f"<pre><code>{_escape(output.rstrip())}</code></pre>"
+
     except Exception as e:
         logger.error("run_python: %s", e)
         if tg_ctx is not None:

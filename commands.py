@@ -18,6 +18,7 @@ New commands:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -35,10 +36,18 @@ from telegram.ext import ContextTypes
 
 import db
 import state
-from config import DEFAULT_LANG, DEFAULT_MODEL, ENABLE_FOLLOWUP, ENABLE_PLUGINS, GEMINI_KEYS, MODELS, OWNER_ID
+from config import (
+    DEFAULT_LANG, DEFAULT_MODEL, DEFAULT_THINKING_LEVEL, ENABLE_FOLLOWUP,
+    ENABLE_GROUNDING, ENABLE_PLUGINS, GEMINI_KEYS, MODELS, OWNER_ID,
+)
 from handlers import _MODEL_LABELS
 from i18n import t, lang_list_str, lang_name, SUPPORTED
 from tools_web import get_search_engine_status
+import config
+import crypto
+import utils
+import group_context
+import monitor_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +197,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         t("help.topic",        lang),
         t("help.status",       lang),
         t("help.lang",         lang),
+        "",
+        "<b>📡 Monitor & Proxy & Ngữ cảnh</b>" if lang == "vi" else "<b>📡 Monitor, Proxy & Context</b>",
+        ("• <code>/setgroup &lt;id|here&gt;</code> — Đặt nhóm đích quan sát / relay" if lang == "vi" else "• <code>/setgroup &lt;id|here&gt;</code> — Set target group for monitor / relay"),
+        ("• <code>/monitor [on|off]</code> — Giám sát tin nhóm thời gian thực về DM" if lang == "vi" else "• <code>/monitor [on|off]</code> — Real-time group monitor pushed to DM"),
+        ("• <code>/proxy [on|off]</code> — Bật/tắt relay 2 chiều DM ⇄ nhóm" if lang == "vi" else "• <code>/proxy [on|off]</code> — 2-way DM ⇄ group relay mode"),
+        ("• <code>/purge</code> (reply) · <code>/purge &lt;n&gt;</code> · <code>/purgeuser</code> — Xóa tin hàng loạt" if lang == "vi" else "• <code>/purge</code> (reply) · <code>/purge &lt;n&gt;</code> · <code>/purgeuser</code> — Bulk delete messages"),
+        ("• <code>/tomtat [n]</code> — Tóm tắt diễn biến nhóm bằng AI Gemini" if lang == "vi" else "• <code>/tomtat [n]</code> — Summarize group discussion with Gemini"),
+        ("• <code>/aictx [n|clear]</code> — Xem / cấu hình bối cảnh nhóm gửi AI" if lang == "vi" else "• <code>/aictx [n|clear]</code> — Configure group context size / clear"),
+        ("• <code>/encstatus</code> — Kiểm tra trạng thái mã hóa Fernet" if lang == "vi" else "• <code>/encstatus</code> — Check Fernet cryptography encryption status"),
+        ("• <code>/thinking [low|med|high]</code> — Mức độ suy luận Gemini" if lang == "vi" else "• <code>/thinking [low|med|high]</code> — Gemini thinking level"),
+        ("• <code>/grounding [on|off]</code> — Bật/tắt Google Search Grounding" if lang == "vi" else "• <code>/grounding [on|off]</code> — Toggle Google Search Grounding"),
         "",
         f"<b>{t('help.models.title', lang)}</b>\n{model_lines}",
     ]
@@ -844,11 +864,26 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     persist_icon = "✅ DB" if db_info.get("ready") else "⚠️ RAM only (mất khi restart)"
     uid_line = f"🗂 Users    : <b>{kn}</b> known ({persist_icon})"
 
+    thinking_val = cfg.get("thinking", DEFAULT_THINKING_LEVEL).upper()
+    grounding_val = "✅" if cfg.get("grounding", ENABLE_GROUNDING) else "❌"
+
+    tgt = monitor_proxy.get_target_group_id()
+    tgt_str = f"<code>{tgt}</code>" if tgt else ("Chưa đặt" if lang == "vi" else "Not set")
+    mon_icon = "✅ BẬT" if monitor_proxy.is_monitor_on() else "❌ Tắt"
+    proxy_icon = "✅ BẬT" if monitor_proxy.is_proxy_on() else "❌ Tắt"
+    enc_icon = "🛡️ Fernet" if crypto.is_crypto_active() else "⚠️ Plain"
+
     await _reply(update,
         f"{t('status.title', lang)}\n\n"
         f"{t('status.conv', lang)}   : <code>{cid}</code>\n"
         f"{t('status.history', lang)}: {msgs_str}\n"
         f"{model_line}\n"
+        f"🧠 Thinking  : <b>{thinking_val}</b>\n"
+        f"🌐 Grounding : {grounding_val}\n"
+        f"🎯 Target GRP: {tgt_str}\n"
+        f"👁️ Monitor   : {mon_icon}\n"
+        f"📡 Proxy     : {proxy_icon}\n"
+        f"🔐 Security  : {enc_icon}\n"
         f"{key_line}\n"
         f"{wh_line}\n"
         f"{se_line}\n"
@@ -859,6 +894,92 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{t('status.feed', lang)}: {feed_count} {t('status.msgs_unit', lang)}"
         f"{db_line}"
     )
+
+
+async def cmd_thinking(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    cid   = _get_conv_id(update)
+    cfg   = state.get_cfg(cid)
+    cur   = cfg.get("thinking", DEFAULT_THINKING_LEVEL)
+    args  = (update.message.text or "").split()[1:]
+    lang  = _lang(update)
+
+    if not args:
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"{'✅ ' if cur == 'low' else ''}Low", callback_data="thinking:low"),
+                InlineKeyboardButton(f"{'✅ ' if cur == 'medium' else ''}Medium", callback_data="thinking:medium"),
+                InlineKeyboardButton(f"{'✅ ' if cur == 'high' else ''}High", callback_data="thinking:high"),
+            ]
+        ])
+        msg_text = (
+            f"🧠 <b>Gemini Thinking Level</b>\n\n"
+            f"Hiện tại: <b>{cur.upper()}</b>\n"
+            f"• <b>Low</b>: Nhanh nhất, tiết kiệm token (budget=0 cho Gemini 2.5)\n"
+            f"• <b>Medium</b>: Cân bằng, suy luận vừa phải (mặc định)\n"
+            f"• <b>High</b>: Suy luận sâu tối đa cho bài toán phức tạp\n\n"
+            f"Chọn mức suy luận bên dưới:"
+            if lang == "vi" else
+            f"🧠 <b>Gemini Thinking Level</b>\n\n"
+            f"Current: <b>{cur.upper()}</b>\n"
+            f"• <b>Low</b>: Fastest, lowest token usage (budget=0 on 2.5)\n"
+            f"• <b>Medium</b>: Balanced reasoning depth (default)\n"
+            f"• <b>High</b>: Deep reasoning for complex math / code\n\n"
+            f"Select reasoning level below:"
+        )
+        await update.message.reply_text(msg_text, parse_mode="HTML", reply_markup=kb)
+        return
+
+    choice = args[0].lower()
+    if choice in ("low", "thấp"):
+        state.set_cfg(cid, thinking="low")
+        await _reply(update, "🧠 Thinking level: <b>LOW</b>" if lang != "vi" else "🧠 Mức độ suy luận: <b>THẤP (LOW)</b>")
+    elif choice in ("medium", "vừa", "trung bình"):
+        state.set_cfg(cid, thinking="medium")
+        await _reply(update, "🧠 Thinking level: <b>MEDIUM</b>" if lang != "vi" else "🧠 Mức độ suy luận: <b>TRUNG BÌNH (MEDIUM)</b>")
+    elif choice in ("high", "cao"):
+        state.set_cfg(cid, thinking="high")
+        await _reply(update, "🧠 Thinking level: <b>HIGH</b>" if lang != "vi" else "🧠 Mức độ suy luận: <b>CAO (HIGH)</b>")
+    else:
+        await _reply(update, "Usage: <code>/thinking low|medium|high</code>")
+
+
+async def cmd_grounding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    cid   = _get_conv_id(update)
+    cfg   = state.get_cfg(cid)
+    cur   = cfg.get("grounding", ENABLE_GROUNDING)
+    args  = (update.message.text or "").split()[1:]
+    lang  = _lang(update)
+
+    if not args:
+        state_str = ("BẬT" if cur else "TẮT") if lang == "vi" else ("ON" if cur else "OFF")
+        await _reply(
+            update,
+            f"🌐 Google Search Grounding: <b>{state_str}</b>\nNguồn trích dẫn: <b>{"BẬT" if cfg.get("grounding_sources") else "TẮT"}</b>\n(Gemini 3.x ghép được với tool; model khác chỉ khi không bật plugin)\nDùng: <code>/grounding on|off</code> · <code>/grounding src on|off</code>"
+            if lang == "vi" else
+            f"🌐 Google Search Grounding: <b>{state_str}</b>\nShow sources: <b>{"ON" if cfg.get("grounding_sources") else "OFF"}</b>\n(Gemini 3.x can combine with tools; other models only without plugins)\nUsage: <code>/grounding on|off</code> · <code>/grounding src on|off</code>"
+        )
+    elif args[0].lower() in ("src", "sources", "nguon", "nguồn"):
+        val = (args[1].lower() if len(args) > 1 else "")
+        if val in ("on", "1", "true", "bật"):
+            state.set_cfg(cid, grounding_sources=True)
+            await _reply(update, "📎 Đã BẬT hiển thị nguồn (khi Gemini có dùng Google Search)." if lang == "vi" else "📎 Sources display: <b>ON</b> (when Gemini used Google Search).")
+        elif val in ("off", "0", "false", "tắt"):
+            state.set_cfg(cid, grounding_sources=False)
+            await _reply(update, "📎 Đã TẮT hiển thị nguồn." if lang == "vi" else "📎 Sources display: <b>OFF</b>.")
+        else:
+            await _reply(update, "Usage: <code>/grounding src on|off</code>")
+    elif args[0].lower() in ("on", "1", "true", "bật"):
+        state.set_cfg(cid, grounding=True)
+        await _reply(update, "🌐 Google Search Grounding: <b>ON</b>" if lang != "vi" else "🌐 Đã <b>BẬT</b> Google Search Grounding.")
+    elif args[0].lower() in ("off", "0", "false", "tắt"):
+        state.set_cfg(cid, grounding=False)
+        await _reply(update, "🌐 Google Search Grounding: <b>OFF</b>" if lang != "vi" else "🌐 Đã <b>TẮT</b> Google Search Grounding.")
+    else:
+        await _reply(update, "Usage: <code>/grounding on|off</code>")
 
 
 async def cmd_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -912,3 +1033,358 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Switch language only — history is preserved
     state.set_cfg(cid, lang=code)
     await _reply(update, t("lang.set", code, name=lang_name(code)))
+
+
+# ─────────────────────────────────────────────────────────────
+# /setgroup  /monitor  /proxy  /tomtat  /aictx  /encstatus
+# ─────────────────────────────────────────────────────────────
+
+async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    chat = update.effective_chat
+    args = (update.message.text or "").split()[1:]
+    lang = _lang(update)
+
+    if not args:
+        cur = monitor_proxy.get_target_group_id()
+        if cur:
+            await _reply(update, f"🎯 Nhóm đích hiện tại: <code>{cur}</code>\nĐổi nhóm: <code>/setgroup &lt;id|here&gt;</code>" if lang == "vi" else f"🎯 Current target group: <code>{cur}</code>\nChange: <code>/setgroup &lt;id|here&gt;</code>")
+        else:
+            await _reply(update, "🎯 Chưa đặt nhóm đích.\nVào nhóm gõ <code>/setgroup here</code> hoặc gõ <code>/setgroup &lt;id&gt;</code>." if lang == "vi" else "🎯 No target group configured.\nRun <code>/setgroup here</code> in the group or <code>/setgroup &lt;id&gt;</code>.")
+        return
+
+    arg = args[0].lower().strip()
+    if arg == "here":
+        if chat.type == ChatType.PRIVATE:
+            await _reply(update, "❌ Lệnh <code>/setgroup here</code> chỉ dùng được trong nhóm." if lang == "vi" else "❌ <code>/setgroup here</code> can only be used in a group.")
+            return
+        target_id = chat.id
+    else:
+        try:
+            target_id = int(arg)
+        except ValueError:
+            await _reply(update, "❌ ID nhóm phải là số nguyên (vd: <code>-1001234567890</code>)." if lang == "vi" else "❌ Group ID must be an integer.")
+            return
+
+    monitor_proxy.set_target_group_id(target_id)
+    await _reply(update, f"✅ Đã đặt nhóm đích: <code>{target_id}</code>\nGiờ bạn có thể dùng <code>/monitor</code> và <code>/proxy</code>." if lang == "vi" else f"✅ Target group set to: <code>{target_id}</code>\nYou can now use <code>/monitor</code> and <code>/proxy</code>.")
+
+
+async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    args = (update.message.text or "").split()[1:]
+    cur = monitor_proxy.is_monitor_on()
+    lang = _lang(update)
+    target = monitor_proxy.get_target_group_id()
+
+    if not args:
+        state_str = "BẬT" if cur else "TẮT"
+        target_str = f"<code>{target}</code>" if target else ("Chưa đặt — dùng /setgroup" if lang == "vi" else "Not set — use /setgroup")
+        await _reply(
+            update,
+            f"👁️ <b>Giám sát nhóm (Monitor)</b>: <b>{state_str}</b>\n"
+            f"🎯 Nhóm quan sát: {target_str}\n\n"
+            f"• <code>/monitor on</code>: Bật đẩy tin nhắn nhóm về DM\n"
+            f"• <code>/monitor off</code>: Tắt giám sát\n"
+            f"• <code>/monitor dm on|off</code>: Báo DM của người lạ gửi bot (hiện: <b>{'BẬT' if monitor_proxy.is_monitor_dm_on() else 'TẮT'}</b>)\n"
+            f"• <code>/setgroup</code>: Chọn nhóm cần quan sát"
+            if lang == "vi" else
+            f"👁️ <b>Group Monitor</b>: <b>{'ON' if cur else 'OFF'}</b>\n"
+            f"🎯 Target group: {target_str}\n\n"
+            f"• <code>/monitor on</code>: Enable forwarding to DM\n"
+            f"• <code>/monitor off</code>: Disable monitor\n"
+            f"• <code>/monitor dm on|off</code>: Report DMs from strangers (now: <b>{'ON' if monitor_proxy.is_monitor_dm_on() else 'OFF'}</b>)\n"
+            f"• <code>/setgroup</code>: Set target group"
+        )
+        return
+
+    choice = args[0].lower().strip()
+    if choice == "dm" and len(args) > 1 and args[1].lower() in ("on", "off", "1", "0", "bật", "tắt"):
+        on = args[1].lower() in ("on", "1", "bật")
+        monitor_proxy.set_monitor_dm(on)
+        await _reply(update, f"📥 Giám sát DM: <b>{'BẬT' if on else 'TẮT'}</b> (cần /monitor on)." if lang == "vi" else f"📥 DM monitor: <b>{'ON' if on else 'OFF'}</b> (requires /monitor on).")
+        return
+    if choice in ("on", "1", "true", "bật"):
+        monitor_proxy.set_monitor(True)
+        await _reply(update, "👁️ Đã <b>BẬT</b> chế độ giám sát nhóm (Monitor)." if lang == "vi" else "👁️ Group Monitor is now <b>ON</b>.")
+    elif choice in ("off", "0", "false", "tắt"):
+        monitor_proxy.set_monitor(False)
+        await _reply(update, "👁️ Đã <b>TẮT</b> chế độ giám sát nhóm (Monitor)." if lang == "vi" else "👁️ Group Monitor is now <b>OFF</b>.")
+    else:
+        await _reply(update, "Usage: <code>/monitor on|off</code> · <code>/monitor dm on|off</code>")
+
+
+async def cmd_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await _reply(update, "📡 Lệnh <code>/proxy</code> chỉ dùng trong DM riêng với bot!" if _lang(update) == "vi" else "📡 <code>/proxy</code> can only be used in private DM!")
+        return
+
+    args = (update.message.text or "").split()[1:]
+    cur = monitor_proxy.is_proxy_on()
+    lang = _lang(update)
+    target = monitor_proxy.get_target_group_id()
+
+    if not args:
+        state_str = "BẬT" if cur else "TẮT"
+        target_str = f"<code>{target}</code>" if target else "⚠️ Chưa đặt (dùng /setgroup)"
+        await _reply(
+            update,
+            f"📡 <b>Chế độ Relay 2 chiều (Proxy)</b>: <b>{state_str}</b>\n"
+            f"🎯 Nhóm đích: {target_str}\n\n"
+            f"📖 <b>Cách dùng khi Proxy BẬT:</b>\n"
+            f"• Gõ tin nhắn thường (hoặc gửi ảnh/file/voice) → bot gửi vào nhóm\n"
+            f"• <code>reply &lt;msg_id&gt; &lt;nội dung&gt;</code> → reply vào tin cụ thể trong nhóm\n"
+            f"• <code>del &lt;msg_id&gt;</code> → xóa tin trong nhóm\n"
+            f"• <code>edit &lt;msg_id&gt; &lt;nội dung&gt;</code> → sửa tin bot đã gửi trong nhóm\n"
+            f"• <code>/proxy off</code> → tắt relay, trở lại chat AI bình thường"
+            if lang == "vi" else
+            f"📡 <b>2-Way Proxy Relay</b>: <b>{'ON' if cur else 'OFF'}</b>\n"
+            f"🎯 Target group: {target_str}\n\n"
+            f"📖 <b>Usage while Proxy is ON:</b>\n"
+            f"• Type normal message (or send media) → relayed to group\n"
+            f"• <code>reply &lt;msg_id&gt; &lt;content&gt;</code> → reply to group message\n"
+            f"• <code>del &lt;msg_id&gt;</code> → delete group message\n"
+            f"• <code>edit &lt;msg_id&gt; &lt;content&gt;</code> → edit bot's message\n"
+            f"• <code>/proxy off</code> → return to normal AI chat"
+        )
+        return
+
+    choice = args[0].lower().strip()
+    if choice in ("on", "1", "true", "bật"):
+        if not target:
+            await _reply(update, "⚠️ Hãy đặt nhóm đích trước: <code>/setgroup &lt;id&gt;</code>" if lang == "vi" else "⚠️ Set target group first: <code>/setgroup &lt;id&gt;</code>")
+            return
+        monitor_proxy.set_proxy(True)
+        await _reply(update, f"📡 Đã <b>BẬT</b> Proxy Relay tới nhóm <code>{target}</code>." if lang == "vi" else f"📡 Proxy Relay is now <b>ON</b> for group <code>{target}</code>.")
+    elif choice in ("off", "0", "false", "tắt"):
+        monitor_proxy.set_proxy(False)
+        await _reply(update, "📡 Đã <b>TẮT</b> Proxy Relay. Trở lại chế độ chat AI." if lang == "vi" else "📡 Proxy Relay is now <b>OFF</b>. Back to AI chat.")
+    else:
+        await _reply(update, "Usage: <code>/proxy on|off</code>")
+
+
+async def cmd_tomtat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    chat = update.effective_chat
+    lang = _lang(update)
+    args = (update.message.text or "").split()[1:]
+
+    # Determine which group to summarize
+    if chat.type in ("group", "supergroup"):
+        target_chat_id = chat.id
+    else:
+        target_chat_id = monitor_proxy.get_target_group_id()
+        if not target_chat_id:
+            await _reply(update, "⚠️ Bạn đang ở DM. Hãy cấu hình nhóm đích trước: <code>/setgroup &lt;id&gt;</code>" if lang == "vi" else "⚠️ You are in DM. Configure target group first: <code>/setgroup &lt;id&gt;</code>")
+            return
+
+    count = 50
+    if args and args[0].isdigit():
+        count = int(args[0])
+
+    status_msg = await update.message.reply_text("⏳ <i>Đang đọc lịch sử nhóm và tạo tóm tắt bằng Gemini...</i>" if lang == "vi" else "⏳ <i>Reading group logs and generating summary with Gemini...</i>", parse_mode="HTML")
+
+    try:
+        summary = await monitor_proxy.summarize_chat(target_chat_id, count=count, lang=lang)
+        chunks = utils.split_message(summary)
+        for i, ch in enumerate(chunks):
+            html_out = utils.md_to_html(ch)
+            try:
+                if i == 0:
+                    await status_msg.edit_text(html_out, parse_mode="HTML")
+                else:
+                    await update.message.reply_text(html_out, parse_mode="HTML")
+            except Exception:
+                # HTML parse failure → plain-text fallback
+                if i == 0:
+                    await status_msg.edit_text(ch)
+                else:
+                    await update.message.reply_text(ch)
+    except Exception as e:
+        logger.error("cmd_tomtat error: %s", e)
+        try:
+            await status_msg.edit_text(f"❌ Lỗi tạo tóm tắt: {e}")
+        except Exception:
+            pass
+
+
+async def cmd_aictx(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    chat = update.effective_chat
+    lang = _lang(update)
+    args = (update.message.text or "").split()[1:]
+
+    target_id = chat.id if chat.type != ChatType.PRIVATE else monitor_proxy.get_target_group_id()
+
+    if not args:
+        ram_count = len(group_context.GROUP_HISTORY.get(target_id, [])) if target_id else 0
+        await _reply(
+            update,
+            f"🧠 <b>Cấu hình Bối Cảnh Nhóm (AI Group Context)</b>\n\n"
+            f"• Nhóm hiện tại: <code>{target_id or 'Chưa chọn'}</code>\n"
+            f"• Số tin đính kèm mỗi lượt AI: <b>{config.AI_CTX_MSGS}</b> tin\n"
+            f"• Giới hạn ký tự tối đa: <b>{config.AI_CTX_CHARS}</b> ký tự\n"
+            f"• Tin đang đệm trong RAM: <b>{ram_count}</b> tin\n\n"
+            f"Lệnh:\n"
+            f"• <code>/aictx &lt;số tin&gt;</code>: Thay đổi số tin gửi AI (vd: <code>/aictx 40</code>)\n"
+            f"• <code>/aictx chars &lt;n&gt;</code>: Đổi trần ký tự (500–20000)\n"
+            f"• <code>/aictx log on|off</code>: Bật/tắt GHI lịch sử nhóm (hiện: <b>{'BẬT' if config.GROUP_CONTEXT_ENABLED else 'TẮT'}</b>)\n"
+            f"• <code>/aictx clear</code>: Xóa sạch bộ nhớ ngữ cảnh nhóm này"
+            if lang == "vi" else
+            f"🧠 <b>AI Group Context Configuration</b>\n\n"
+            f"• Current chat: <code>{target_id or 'None'}</code>\n"
+            f"• Context messages per turn: <b>{config.AI_CTX_MSGS}</b>\n"
+            f"• Character limit: <b>{config.AI_CTX_CHARS}</b> chars\n"
+            f"• Buffered in RAM: <b>{ram_count}</b> msgs\n\n"
+            f"Commands:\n"
+            f"• <code>/aictx &lt;count&gt;</code>: Set message count (e.g. <code>/aictx 40</code>)\n"
+            f"• <code>/aictx chars &lt;n&gt;</code>: Set char limit (500–20000)\n"
+            f"• <code>/aictx log on|off</code>: Enable/disable group history LOGGING (now: <b>{'ON' if config.GROUP_CONTEXT_ENABLED else 'OFF'}</b>)\n"
+            f"• <code>/aictx clear</code>: Clear group context for this chat"
+        )
+        return
+
+    sub = args[0].lower().strip()
+    if sub == "clear":
+        if not target_id:
+            await _reply(update, "❌ Chưa xác định nhóm cần xóa ngữ cảnh.")
+            return
+        group_context.clear_group_context(target_id)
+        await _reply(update, f"🧹 Đã xóa sạch ngữ cảnh nhóm <code>{target_id}</code>." if lang == "vi" else f"🧹 Cleared context for chat <code>{target_id}</code>.")
+    elif sub.isdigit():
+        new_cnt = int(sub)
+        config.AI_CTX_MSGS = max(0, min(new_cnt, 100))
+        await db.config_set("ai_ctx_msgs", config.AI_CTX_MSGS)
+        await _reply(update, f"✅ Đã đặt số tin bối cảnh nhóm: <b>{config.AI_CTX_MSGS}</b> tin." if lang == "vi" else f"✅ Group context messages set to: <b>{config.AI_CTX_MSGS}</b>.")
+    elif sub == "chars" and len(args) > 1 and args[1].isdigit():
+        config.AI_CTX_CHARS = max(500, min(int(args[1]), 20000))
+        await db.config_set("ai_ctx_chars", config.AI_CTX_CHARS)
+        await _reply(update, f"✅ Trần ký tự bối cảnh: <b>{config.AI_CTX_CHARS}</b>." if lang == "vi" else f"✅ Context char limit: <b>{config.AI_CTX_CHARS}</b>.")
+    elif sub == "log" and len(args) > 1 and args[1].lower() in ("on", "off", "1", "0", "bật", "tắt"):
+        on = args[1].lower() in ("on", "1", "bật")
+        config.GROUP_CONTEXT_ENABLED = on
+        await db.config_set("ai_log_groups", on)
+        await _reply(update,
+            ("✅ Đã BẬT ghi lịch sử nhóm." if on else "✅ Đã TẮT ghi lịch sử nhóm (tin mới sẽ không được lưu; dữ liệu cũ vẫn còn — dùng /aictx clear để xóa).")
+            if lang == "vi" else
+            ("✅ Group history logging <b>ON</b>." if on else "✅ Group history logging <b>OFF</b> (new messages are not stored; old data remains — use /aictx clear)."))
+    else:
+        await _reply(update, "Usage: <code>/aictx [&lt;count&gt; | chars &lt;n&gt; | log on|off | clear]</code>")
+
+
+async def cmd_encstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _owner_only(update):
+        return
+    stat = crypto.get_crypto_status()
+    lang = _lang(update)
+
+    avail_icon = "✅ Có sẵn" if stat["available"] else "❌ Chưa cài"
+    act_icon   = "🛡️ ĐANG BẬT" if stat["active"] else "⚠️ TẮT"
+
+    await _reply(
+        update,
+        f"🔐 <b>Trạng Thái Mã Hóa Fernet (Cryptography)</b>\n\n"
+        f"• Thư viện cryptography : {avail_icon}\n"
+        f"• Trạng thái bảo vệ     : {act_icon}\n"
+        f"• Nguồn khóa (Key source): <code>{stat['source']}</code>\n\n"
+        f"<i>Fernet mã hóa nội dung hội thoại AI (bảng conversations). Lịch sử nhóm (chat_history) lưu plaintext để tìm kiếm được."
+        + ("\n⚠️ Khóa đang lưu cùng DB — hãy đặt biến ENCRYPTION_KEY." if stat["source"] != "env" and stat["active"] else "") + "</i>"
+        if lang == "vi" else
+        f"🔐 <b>Fernet Encryption Status</b>\n\n"
+        f"• Library installed : {avail_icon}\n"
+        f"• Protection status : {act_icon}\n"
+        f"• Key source        : <code>{stat['source']}</code>\n\n"
+        f"<i>Fernet encrypts AI conversation content (conversations table). Group history (chat_history) is plaintext so it stays searchable."
+        + ("\n⚠️ Key is stored in the same DB — set ENCRYPTION_KEY env var." if stat["source"] != "env" and stat["active"] else "") + "</i>"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# /purge  /purgeuser — xóa tin hàng loạt
+# ─────────────────────────────────────────────────────────────
+import purge as _purge
+
+
+async def _flash(bot, chat_id: int, text: str, secs: int = 4) -> None:
+    try:
+        m = await bot.send_message(chat_id, text, parse_mode="HTML")
+        await asyncio.sleep(secs)
+        await m.delete()
+    except Exception:
+        pass
+
+
+async def cmd_purge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/purge (reply vào tin đầu) | /purge <n> | thêm `force` để vượt giới hạn 200."""
+    if not _owner_only(update):
+        return
+    msg, chat = update.message, update.effective_chat
+    lang = _lang(update)
+    if chat.type == ChatType.PRIVATE:
+        await _reply(update, "🧹 /purge chỉ dùng trong nhóm." if lang == "vi" else "🧹 /purge works in groups only.")
+        return
+    args = [a.lower() for a in (msg.text or "").split()[1:]]
+    force = "force" in args
+    nums = [a for a in args if a.isdigit()]
+
+    if msg.reply_to_message:
+        res = await _purge.purge_range(context.bot, chat.id, msg.reply_to_message.message_id,
+                                       msg.message_id, force=force)
+    elif nums:
+        res = await _purge.delete_last_n(context.bot, chat.id, int(nums[0]), msg.message_id)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+    else:
+        await _reply(update,
+            "🧹 Reply vào tin <b>đầu tiên</b> muốn xóa, hoặc dùng <code>/purge &lt;n&gt;</code> (n tin gần nhất)."
+            if lang == "vi" else
+            "🧹 Reply to the <b>first</b> message to delete, or use <code>/purge &lt;n&gt;</code> (last n messages).")
+        return
+
+    if not res.get("ok"):
+        extra = ("\nGõ <code>/purge force</code> (reply như cũ) nếu chắc chắn." if res.get("needs_force") and lang == "vi"
+                 else "\nUse <code>/purge force</code> (reply as before) if you are sure." if res.get("needs_force") else "")
+        await _reply(update, f"⚠️ {res.get('error')}{extra}")
+        return
+    note = f" (không xóa được {res['failed']})" if res.get("failed") else ""
+    await _flash(context.bot, chat.id,
+                 (f"✅ Đã xóa <b>{res['deleted']}</b> tin{note}." if lang == "vi" else f"✅ Deleted <b>{res['deleted']}</b> messages{note}."))
+
+
+async def cmd_purgeuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/purgeuser (reply | @user | id) — xóa các tin của người đó mà bot đã ghi lại."""
+    if not _owner_only(update):
+        return
+    msg, chat = update.message, update.effective_chat
+    lang = _lang(update)
+    if chat.type == ChatType.PRIVATE:
+        await _reply(update, "🧹 /purgeuser chỉ dùng trong nhóm." if lang == "vi" else "🧹 /purgeuser works in groups only.")
+        return
+    uid, _rest = await _resolve_target(update, context, (msg.text or "").split()[1:])
+    if not uid:
+        await _reply(update, "Dùng: reply vào tin của người đó hoặc <code>/purgeuser @user|id</code>." if lang == "vi"
+                     else "Usage: reply to their message or <code>/purgeuser @user|id</code>.")
+        return
+    if uid == OWNER_ID:
+        await _reply(update, "❌ Không xóa hàng loạt tin của chính chủ nhân." if lang == "vi" else "❌ Refusing to purge the owner's own messages.")
+        return
+    res = await _purge.purge_user(context.bot, chat.id, uid)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if res.get("note"):
+        await _flash(context.bot, chat.id, f"ℹ️ {res['note']}", 6)
+        return
+    note = f" (không xóa được {res['failed']})" if res.get("failed") else ""
+    await _flash(context.bot, chat.id,
+                 (f"✅ Đã xóa <b>{res['deleted']}</b> tin của <code>{uid}</code>{note}." if lang == "vi"
+                  else f"✅ Deleted <b>{res['deleted']}</b> messages from <code>{uid}</code>{note}."))

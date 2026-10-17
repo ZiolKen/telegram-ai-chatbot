@@ -64,6 +64,14 @@ The bot can do everything a human admin can do on Telegram — and then some.
 | `ENABLE_PLUGINS` | `true` | Enable all tools/plugins globally |
 | `DEFAULT_LANG` | `en` | Default bot language (`en` = English, `vi` = Vietnamese). Override per-conversation with `/lang` |
 | `ENABLE_FOLLOWUP` | `true` | Generate follow-up question buttons after responses |
+| `DEFAULT_THINKING_LEVEL` | `medium` | Gemini thinking level: `low` / `medium` / `high` (per-chat override via `/thinking`) |
+| `ENABLE_GROUNDING` | `false` | Google Search grounding for Gemini 3.x (per-chat override via `/grounding`) |
+| `GEMINI_TIMEOUT_SECONDS` | `90` | Per-request Gemini timeout |
+| `AI_CTX_MSGS` / `AI_CTX_CHARS` | `30` / `6000` | Group context size injected into the prompt (`/aictx <n>` changes the count, persisted) |
+| `TZ_OFFSET_HOURS` | `7` | Display timezone offset for group history/monitor (VN = UTC+7) |
+| `TARGET_GROUP_ID` | `0` | Group used by `/monitor`, `/proxy`, `/tomtat` (or set with `/setgroup`) |
+| `MONITOR_MODE` / `PROXY_MODE` | `false` | Initial state of the group monitor / DM⇄group relay |
+| `ENCRYPTION_KEY` | _(auto)_ | Fernet key for conversation encryption. Set it yourself; if omitted a key is generated and stored in the DB |
 | `FOLLOWUP_COUNT` | `3` | Number of follow-up questions to generate |
 | `MESSAGE_MERGE_DELAY` | `1.5` | Seconds to wait before processing, to merge rapid consecutive messages |
 | `TAVILY_API_KEY` | `""` | Tavily API key (optional, primary web_search engine; falls back to DuckDuckGo if unset). Uses `search_depth=advanced` (2 credits/call, deeper & more relevant snippets) — free tier gives 1,000 credits/month = ~500 searches |
@@ -481,3 +489,10 @@ If you find this helpful:
 <div>
   <img style="width: 100%;" src="https://capsule-render.vercel.app/api?type=waving&height=110&section=footer&fontSize=60&fontColor=FFFFFF&fontAlign=50&fontAlignY=40&descSize=18&descAlign=50&descAlignY=70&theme=cobalt" />
 </div>
+
+
+## New commands
+
+`/thinking`, `/grounding [on|off|src on|off]`, `/setgroup <id|here>`, `/monitor [on|off|dm on|off]`, `/proxy [on|off]`, `/tomtat [n]`, `/aictx [n|chars n|log on|off|clear]`, `/encstatus`, `/purge` (reply | `<n>` | `force`), `/purgeuser` (reply | @user | id).
+
+Notes: group history is only recorded while `/aictx log` is ON; purge only deletes messages Telegram still allows (~48h limit, needs *Delete messages* permission) and `/purgeuser` only knows messages the bot has recorded.

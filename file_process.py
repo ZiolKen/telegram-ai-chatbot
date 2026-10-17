@@ -35,6 +35,7 @@ import base64
 import logging
 import mimetypes
 import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -47,7 +48,7 @@ from i18n import DEFAULT_LANG, t
 
 logger = logging.getLogger(__name__)
 
-TMP_DIR = "/tmp"
+TMP_DIR = tempfile.gettempdir()
 
 # Mọi file bot tải về đều được đặt tên với prefix này. /tmp là thư mục dùng
 # chung cho CẢ container (pip, os.tempfile, các process khác...), nên vòng

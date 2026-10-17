@@ -250,6 +250,45 @@ async def _create_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_conv_id_asc
             ON conversations (id ASC)
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id         BIGSERIAL   PRIMARY KEY,
+                chat_id    BIGINT      NOT NULL,
+                msg_id     BIGINT      NOT NULL,
+                user_id    BIGINT      NOT NULL,
+                name       TEXT        NOT NULL,
+                username   TEXT        NOT NULL DEFAULT '',
+                text       TEXT        NOT NULL DEFAULT '',
+                type       TEXT        NOT NULL DEFAULT 'text',
+                is_bot     BOOLEAN     NOT NULL DEFAULT FALSE,
+                reply_to   BIGINT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                CONSTRAINT uq_chat_history_chat_msg UNIQUE (chat_id, msg_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chat_history_lookup
+            ON chat_history (chat_id, msg_id DESC)
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chat_history_search
+            ON chat_history (chat_id, created_at DESC)
+        """)
+
+        # ── Initialize Fernet Encryption key if crypto is available ──
+        try:
+            import crypto
+            enc_row = await conn.fetchrow("SELECT value FROM bot_config WHERE key = '_enc_key'")
+            enc_key_db = json.loads(enc_row["value"]) if enc_row else None
+            saved_key = crypto.init_crypto(enc_key_db)
+            if saved_key and saved_key != enc_key_db:
+                await conn.execute("""
+                    INSERT INTO bot_config (key, value, updated_at)
+                    VALUES ('_enc_key', $1::jsonb, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                """, json.dumps(saved_key))
+        except Exception as e:
+            logger.warning("[db] Fernet key setup failed: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -338,39 +377,88 @@ async def config_delete(key: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def conv_load_all(max_per_conv: int) -> dict[str, list[dict]]:
+    """
+    Load up to max_per_conv recent messages per conversation.
+    Optimized: Uses a single window function query (PARTITION BY conv_id)
+    instead of an N+1 query loop over distinct conv_ids.
+    """
     if not _pool:
         return {}
     try:
         async with _pool.acquire() as conn:
-            id_rows = await conn.fetch("SELECT DISTINCT conv_id FROM conversations")
+            query = """
+                WITH ranked_messages AS (
+                    SELECT
+                        conv_id,
+                        role,
+                        content,
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY conv_id
+                            ORDER BY id DESC
+                        ) AS rk
+                    FROM conversations
+                )
+                SELECT conv_id, role, content
+                FROM ranked_messages
+                WHERE rk <= $1
+                ORDER BY conv_id, id ASC;
+            """
+            rows = await conn.fetch(query, max_per_conv)
             result: dict[str, list[dict]] = {}
-            for row in id_rows:
-                cid      = row["conv_id"]
-                msg_rows = await conn.fetch("""
-                    SELECT role, content
-                    FROM (
-                        SELECT id, role, content
-                        FROM   conversations
-                        WHERE  conv_id = $1
-                        ORDER  BY id DESC
-                        LIMIT  $2
-                    ) sub
-                    ORDER BY id ASC
-                """, cid, max_per_conv)
-                result[cid] = [
-                    {"role": r["role"], "parts": [{"text": r["content"]}]}
-                    for r in msg_rows
-                ]
-        logger.info("[db] conv_load_all: loaded %d conversations.", len(result))
+            for r in rows:
+                cid = r["conv_id"]
+                if cid not in result:
+                    result[cid] = []
+                result[cid].append({
+                    "role": r["role"],
+                    "parts": [{"text": _dec(r["content"])}]
+                })
+        logger.info("[db] conv_load_all: loaded %d conversations via single window-query.", len(result))
         return result
     except Exception as exc:
         logger.error("[db] conv_load_all: %s", exc)
         return {}
 
 
+def _enc(s: str) -> str:
+    try:
+        import crypto
+        return crypto.encrypt(s)
+    except Exception:
+        return s
+
+
+def _dec(s: str) -> str:
+    try:
+        import crypto
+        return crypto.decrypt(s)
+    except Exception:
+        return s
+
+
+async def conv_load_one(conv_id: str, max_per_conv: int) -> list[dict]:
+    """Reload a single conversation (used after LRU eviction from RAM)."""
+    if not _pool:
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT role, content FROM (
+                    SELECT id, role, content FROM conversations
+                    WHERE conv_id = $1 ORDER BY id DESC LIMIT $2
+                ) sub ORDER BY id ASC
+            """, conv_id, max_per_conv)
+        return [{"role": r["role"], "parts": [{"text": _dec(r["content"])}]} for r in rows]
+    except Exception as exc:
+        logger.error("[db] conv_load_one(%s): %s", conv_id, exc)
+        return []
+
+
 async def conv_push(conv_id: str, role: str, content: str) -> None:
     if not _pool:
         return
+    content = _enc(content)
     try:
         async with _pool.acquire() as conn:
             await _maybe_prune(conn)
@@ -418,6 +506,213 @@ async def conv_delete_all() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# chat_history CRUD  (Group Context & Search)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_push_counter: dict[int, int] = {}
+
+
+def _like_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+async def chat_history_push(chat_id: int, msg_id: int, user_id: int,
+                            name: str, username: str, text: str,
+                            mtype: str = "text", is_bot: bool = False,
+                            reply_to: Optional[int] = None, limit: int = 5000,
+                            created_at: Optional[str] = None) -> None:
+    if not _pool:
+        return
+    from datetime import datetime, timezone
+    try:
+        ts = datetime.fromisoformat(created_at) if created_at else None
+    except ValueError:
+        ts = None
+    if ts is not None and ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    try:
+        async with _pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO chat_history (chat_id, msg_id, user_id, name, username, text, type, is_bot, reply_to, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, NOW()))
+                ON CONFLICT (chat_id, msg_id) DO UPDATE
+                    SET text = EXCLUDED.text,
+                        type = EXCLUDED.type,
+                        name = EXCLUDED.name,
+                        username = EXCLUDED.username;
+            """, chat_id, msg_id, user_id, name, username, text, mtype, is_bot, reply_to, ts)
+
+            _push_counter[chat_id] = _push_counter.get(chat_id, 0) + 1
+            cnt = None
+            if _push_counter[chat_id] % 50 == 1:   # trim check only every 50 inserts
+                cnt = await conn.fetchval("SELECT COUNT(*) FROM chat_history WHERE chat_id = $1", chat_id)
+            if cnt and cnt > limit:
+                await conn.execute("""
+                    DELETE FROM chat_history
+                    WHERE id IN (
+                        SELECT id FROM chat_history
+                        WHERE chat_id = $1
+                        ORDER BY id ASC
+                        LIMIT $2
+                    )
+                """, chat_id, cnt - limit)
+    except Exception as exc:
+        logger.error("[db] chat_history_push(%d, %d): %s", chat_id, msg_id, exc)
+
+
+async def chat_history_load(chat_id: int, limit: int = 300) -> list[dict]:
+    if not _pool:
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT chat_id, msg_id, user_id, name, username, text, type, is_bot, reply_to, created_at
+                FROM (
+                    SELECT * FROM chat_history
+                    WHERE chat_id = $1
+                    ORDER BY id DESC
+                    LIMIT $2
+                ) sub
+                ORDER BY id ASC
+            """, chat_id, limit)
+            return [
+                {
+                    "chat_id":  r["chat_id"],
+                    "msg_id":   r["msg_id"],
+                    "user_id":  r["user_id"],
+                    "name":     r["name"],
+                    "username": r["username"],
+                    "text":     r["text"],
+                    "type":     r["type"],
+                    "is_bot":   r["is_bot"],
+                    "reply_to": r["reply_to"],
+                    "ts":       r["created_at"].isoformat() if r["created_at"] else "",
+                }
+                for r in rows
+            ]
+    except Exception as exc:
+        logger.error("[db] chat_history_load(%d): %s", chat_id, exc)
+        return []
+
+
+async def chat_history_search(chat_id: int, query: Optional[str] = None,
+                              sender: Optional[str] = None,
+                              hours_back: Optional[float] = None,
+                              limit: int = 20,
+                              since=None, until=None) -> list[dict]:
+    """since/until: datetime có tz (hoặc None). hours_back chỉ dùng khi since=None."""
+    if not _pool:
+        return []
+    from datetime import datetime, timedelta, timezone
+    try:
+        async with _pool.acquire() as conn:
+            conditions = ["chat_id = $1"]
+            params: list = [chat_id]
+            idx = 2
+            if query:
+                conditions.append(f"text ILIKE ${idx} ESCAPE '\\'")
+                params.append(f"%{_like_escape(query.strip())}%")
+                idx += 1
+            if sender:
+                clean_sender = sender.strip().lstrip("@")
+                conditions.append(f"(name ILIKE ${idx} ESCAPE '\\' OR username ILIKE ${idx} ESCAPE '\\')")
+                params.append(f"%{_like_escape(clean_sender)}%")
+                idx += 1
+            if since is None and hours_back and hours_back > 0:
+                since = datetime.now(timezone.utc) - timedelta(hours=float(hours_back))
+            if since is not None:
+                conditions.append(f"created_at >= ${idx}")
+                params.append(since)
+                idx += 1
+            if until is not None:
+                conditions.append(f"created_at < ${idx}")
+                params.append(until)
+                idx += 1
+
+            where_clause = " AND ".join(conditions)
+            sql = f"""
+                SELECT chat_id, msg_id, user_id, name, username, text, type, is_bot, reply_to, created_at
+                FROM chat_history
+                WHERE {where_clause}
+                ORDER BY id DESC
+                LIMIT ${idx}
+            """
+            params.append(max(1, min(limit, 100)))
+            rows = await conn.fetch(sql, *params)
+            return [
+                {
+                    "chat_id":  r["chat_id"], "msg_id": r["msg_id"], "user_id": r["user_id"],
+                    "name":     r["name"],    "username": r["username"], "text": r["text"],
+                    "type":     r["type"],    "is_bot": r["is_bot"], "reply_to": r["reply_to"],
+                    "ts":       r["created_at"].isoformat() if r["created_at"] else "",
+                }
+                for r in reversed(rows)      # cũ → mới
+            ]
+    except Exception as exc:
+        logger.error("[db] chat_history_search(%d): %s", chat_id, exc)
+        return []
+
+
+async def chat_history_ids_for_user(chat_id: int, user_id: int, limit: int = 1000) -> list[int]:
+    """msg_id các tin của 1 user mà bot đã ghi lại (mới → cũ)."""
+    if not _pool:
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT msg_id FROM chat_history WHERE chat_id=$1 AND user_id=$2 "
+                "ORDER BY msg_id DESC LIMIT $3", chat_id, user_id, limit)
+            return [r["msg_id"] for r in rows]
+    except Exception as exc:
+        logger.error("[db] chat_history_ids_for_user: %s", exc)
+        return []
+
+
+async def chat_history_recent_ids(chat_id: int, before_id: int, limit: int = 100) -> list[int]:
+    """msg_id gần nhất (< before_id) đã ghi lại trong 1 chat (mới → cũ)."""
+    if not _pool:
+        return []
+    try:
+        async with _pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT msg_id FROM chat_history WHERE chat_id=$1 AND msg_id < $2 "
+                "ORDER BY msg_id DESC LIMIT $3", chat_id, before_id, limit)
+            return [r["msg_id"] for r in rows]
+    except Exception as exc:
+        logger.error("[db] chat_history_recent_ids: %s", exc)
+        return []
+
+
+async def chat_history_delete_ids(chat_id: int, msg_ids: list[int]) -> int:
+    if not _pool or not msg_ids:
+        return 0
+    try:
+        async with _pool.acquire() as conn:
+            res = await conn.execute(
+                "DELETE FROM chat_history WHERE chat_id=$1 AND msg_id = ANY($2::bigint[])",
+                chat_id, list(msg_ids))
+            return int(res.split()[-1])
+    except Exception as exc:
+        logger.error("[db] chat_history_delete_ids: %s", exc)
+        return 0
+
+
+async def chat_history_clear(chat_id: int) -> int:
+    if not _pool:
+        return 0
+    try:
+        async with _pool.acquire() as conn:
+            res = await conn.execute("DELETE FROM chat_history WHERE chat_id = $1", chat_id)
+            try:
+                return int(res.split()[-1])
+            except Exception:
+                return 0
+    except Exception as exc:
+        logger.error("[db] chat_history_clear(%d): %s", chat_id, exc)
+        return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Stats  (used by /status command and health endpoint)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -431,11 +726,13 @@ async def stats() -> dict:
         async with _pool.acquire() as conn:
             conv_rows   = await conn.fetchval("SELECT COUNT(*) FROM conversations")
             config_rows = await conn.fetchval("SELECT COUNT(*) FROM bot_config")
+            chat_rows   = await conn.fetchval("SELECT COUNT(*) FROM chat_history")
         return {
-            "ready":         True,
-            "conv_rows":     conv_rows,
-            "config_rows":   config_rows,
-            "max_conv_rows": _MAX_CONV_ROWS,
+            "ready":             True,
+            "conv_rows":         conv_rows,
+            "config_rows":       config_rows,
+            "chat_history_rows": chat_rows,
+            "max_conv_rows":     _MAX_CONV_ROWS,
         }
     except Exception as exc:
         logger.error("[db] stats: %s", exc)

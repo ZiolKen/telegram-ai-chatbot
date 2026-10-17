@@ -31,9 +31,11 @@ from telegram.ext import (
     filters,
 )
 
+import agent
 import db
 import file_cache
 import file_process
+import monitor_proxy
 import state
 from config import (
     BOT_TOKEN, DATABASE_URL, FILE_CACHE_MAX_MB, GEMINI_KEYS, MAX_CONV_ROWS,
@@ -41,7 +43,7 @@ from config import (
 )
 from commands import (
     cmd_help, cmd_model, cmd_plugins,
-    cmd_lang,
+    cmd_lang, cmd_thinking, cmd_grounding,
     cmd_reset, cmd_start, cmd_status,
     cmd_sysreset, cmd_topic,
     cmd_del, cmd_pin,
@@ -50,8 +52,11 @@ from commands import (
     cmd_addadmin, cmd_rmadmin,
     cmd_warn, cmd_warns, cmd_resetwarns,
     cmd_feed, cmd_cancel,
+    cmd_setgroup, cmd_monitor, cmd_proxy,
+    cmd_tomtat, cmd_aictx, cmd_encstatus, cmd_purge, cmd_purgeuser,
 )
-from handlers import handle_callback, handle_chat_member_update, handle_message
+from handlers import handle_callback, handle_chat_member_update, handle_edited_message, handle_message
+import bot_identity
 
 logging.basicConfig(
     format  = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -84,6 +89,8 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("status",   cmd_status))
     app.add_handler(CommandHandler("topic",    cmd_topic))
     app.add_handler(CommandHandler("lang",     cmd_lang))
+    app.add_handler(CommandHandler("thinking", cmd_thinking))
+    app.add_handler(CommandHandler("grounding", cmd_grounding))
     # ── Moderation commands ───────────────────────────────────
     app.add_handler(CommandHandler("del",        cmd_del))
     app.add_handler(CommandHandler("pin",        cmd_pin))
@@ -98,6 +105,20 @@ def _register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("resetwarns", cmd_resetwarns))
     app.add_handler(CommandHandler("feed",       cmd_feed))
     app.add_handler(CommandHandler("cancel",     cmd_cancel))
+    # ── Group Context, Monitor, Proxy, Encryption ────────────
+    app.add_handler(CommandHandler("setgroup",   cmd_setgroup))
+    app.add_handler(CommandHandler("monitor",    cmd_monitor))
+    app.add_handler(CommandHandler("proxy",      cmd_proxy))
+    app.add_handler(CommandHandler("tomtat",     cmd_tomtat))
+    app.add_handler(CommandHandler("aictx",      cmd_aictx))
+    app.add_handler(CommandHandler("encstatus",  cmd_encstatus))
+    app.add_handler(CommandHandler("purge",      cmd_purge))
+    app.add_handler(CommandHandler("purgeuser",  cmd_purgeuser))
+    # DM monitor: thấy mọi tin riêng gửi tới bot (kể cả lệnh), không chặn handler khác
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE, monitor_proxy.dm_monitor_tap), group=-1)
+    # Tin trong nhóm bị sửa → cập nhật lịch sử + báo Monitor
+    app.add_handler(MessageHandler(
+        filters.UpdateType.EDITED_MESSAGE & ~filters.ChatType.PRIVATE, handle_edited_message))
     app.add_handler(MessageHandler(
         (
             filters.TEXT
@@ -176,6 +197,8 @@ async def run_webhook(app: Application) -> None:
     else:
         logger.warning("[startup] DATABASE_URL not set — in-memory only.")
 
+    await monitor_proxy.init_settings()
+
     # ── Init file cache (RAM only) ──────────────────────────────────────────
     file_cache.configure(FILE_CACHE_MAX_MB)
     logger.info("[startup] File cache: %d MB limit", FILE_CACHE_MAX_MB)
@@ -195,6 +218,7 @@ async def run_webhook(app: Application) -> None:
 
     # ── 3. PTB init (.updater(None) đã set → không hang) ─────────────────
     await app.initialize()
+    bot_identity.set_self(app.bot.id, app.bot.username)
     await app.start()
 
     # ── 4. Đăng ký webhook ────────────────────────────────────────────────
@@ -213,6 +237,7 @@ async def run_webhook(app: Application) -> None:
         cleanup_task.cancel()
         await app.stop()
         await app.shutdown()
+        await agent.close_session()
         await db.close()
         await runner.cleanup()
 
@@ -234,9 +259,12 @@ async def run_polling(app: Application) -> None:
     else:
         logger.warning("[startup] DATABASE_URL not set — in-memory only.")
 
+    await monitor_proxy.init_settings()
+
     cleanup_task = asyncio.create_task(file_process.start_cleanup_loop())
 
     await app.initialize()
+    bot_identity.set_self(app.bot.id, app.bot.username)
     await app.start()
     await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     logger.info("[startup] Polling started ✓")
@@ -248,6 +276,7 @@ async def run_polling(app: Application) -> None:
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
+        await agent.close_session()
         await db.close()
 
 

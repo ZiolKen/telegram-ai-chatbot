@@ -20,6 +20,7 @@ from telegram import (
 )
 
 import state
+from config import OWNER_ID
 from i18n import DEFAULT_LANG, t
 
 logger = logging.getLogger(__name__)
@@ -866,29 +867,9 @@ async def tg_send_photo(ctx: TelegramContext, photo: str,
         return t("tools.photo_failed", ctx.lang, err=e)
 
 
-async def tg_edit_message(ctx: TelegramContext, message_id: int,
-                          text: str, chat_id=None,
-                          parse_mode: str = "") -> str:
-    target = _resolve_chat(ctx, chat_id)
-    pm     = parse_mode.strip() or None
-    try:
-        await ctx.bot.edit_message_text(
-            chat_id    = target,
-            message_id = int(message_id),
-            text       = text[:4096],
-            parse_mode = pm,
-        )
-        return t("tools.message_edited", ctx.lang, mid=message_id)
-    except Exception as e:
-        logger.error("tg_edit_message: %s", e)
-        return t("tools.edit_failed", ctx.lang, err=e)
-
-
-# Register new handlers + status labels
-TG_HANDLERS["tg_send_photo"]    = tg_send_photo
-TG_HANDLERS["tg_edit_message"]  = tg_edit_message
+# Register tg_send_photo handler + status label
+TG_HANDLERS["tg_send_photo"] = tg_send_photo
 TOOL_STATUS["tg_send_photo"] = "tool_status.tg_send_photo"
-TOOL_STATUS["tg_edit_message"] = "tool_status.tg_edit_message"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1031,8 +1012,9 @@ async def tg_edit_message(ctx: TelegramContext, message_id: int,
         return t("tools.caption_edit_failed", ctx.lang, err=e2)
 
 
-# Cập nhật dispatcher (ghi đè entry cũ)
+# Cập nhật dispatcher + status label
 TG_HANDLERS["tg_edit_message"] = tg_edit_message
+TOOL_STATUS["tg_edit_message"] = "tool_status.tg_edit_message"
 
 
 # ═════════════════════════════════════════════════════════════
@@ -1509,3 +1491,173 @@ TOOL_STATUS["tg_search_user"] = "tool_status.tg_search_user"
 TOOL_STATUS["tg_send_media_group"] = "tool_status.tg_send_media_group"
 TOOL_STATUS["tg_get_user_info"] = "tool_status.tg_get_user_info"
 TOOL_STATUS["tg_set_user_title"] = "tool_status.tg_set_user_title"
+
+
+# ═════════════════════════════════════════════════════════════
+# search_group_history — Tra cứu tin nhắn cũ trong nhóm
+# ═════════════════════════════════════════════════════════════
+import group_context
+
+TG_TOOL_DECLS.append({
+    "name": "search_group_history",
+    "description": (
+        "Tra cứu lịch sử tin nhắn trong nhóm chat theo từ khóa, người gửi hoặc khoảng thời gian. "
+        "Sử dụng khi chủ nhân hỏi về các tin nhắn cũ hơn, hỏi ai đã nói gì, hoặc tìm lại trao đổi trước đây."
+    ),
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "query": {
+                "type": "STRING",
+                "description": "Từ khóa cần tìm trong nội dung tin nhắn (tùy chọn)."
+            },
+            "sender": {
+                "type": "STRING",
+                "description": "Tên hoặc @username của người gửi cần lọc (tùy chọn)."
+            },
+            "hours_back": {
+                "type": "NUMBER",
+                "description": "Chỉ lấy tin trong N giờ gần nhất. Bỏ trống = không giới hạn thời gian."
+            },
+            "since": {
+                "type": "STRING",
+                "description": "Từ thời điểm (giờ VN), dạng 'YYYY-MM-DD' hoặc 'YYYY-MM-DD HH:MM' (tùy chọn)."
+            },
+            "until": {
+                "type": "STRING",
+                "description": "Đến trước thời điểm (giờ VN), cùng định dạng với since (tùy chọn)."
+            },
+            "limit": {
+                "type": "INTEGER",
+                "description": "Số lượng tin nhắn tối đa cần lấy (mặc định 15, tối đa 50)."
+            },
+            "chat_id": {
+                "type": "STRING",
+                "description": "Chỉ dùng được với chat hiện tại hoặc nhóm đích đã /setgroup (mặc định: chat hiện tại)."
+            }
+        }
+    }
+})
+
+
+async def search_group_history(ctx: TelegramContext, query: str = "",
+                               sender: str = "", hours_back=None,
+                               since: str = "", until: str = "",
+                               limit: int = 15, chat_id=None) -> str:
+    # Security: only the current chat, or the owner's configured target group
+    # (when called from the owner's DM). Never an arbitrary chat_id.
+    import monitor_proxy
+    target = ctx.chat_id
+    if chat_id:
+        want = _resolve_chat(ctx, chat_id)
+        allowed = {ctx.chat_id, monitor_proxy.get_target_group_id()}
+        if want not in allowed or want == 0:
+            return "Không được phép tra cứu lịch sử của chat khác nhóm hiện tại."
+        target = want
+    try:
+        return await group_context.search_history(
+            chat_id    = target,
+            query      = query or None,
+            sender     = sender or None,
+            since      = since or "",
+            until      = until or "",
+            hours_back = hours_back,
+            limit      = limit or 15,
+        )
+    except Exception as e:
+        logger.error("search_group_history failed: %s", e)
+        return f"Lỗi tra cứu lịch sử: {e}"
+
+
+TG_HANDLERS["search_group_history"] = search_group_history
+TOOL_STATUS["search_group_history"] = "tool_status.search_group_history"
+
+
+# ═════════════════════════════════════════════════════════════
+# Purge — xóa tin hàng loạt (chỉ trong chat hiện tại)
+# ═════════════════════════════════════════════════════════════
+import purge as _purge
+
+TG_TOOL_DECLS.extend([
+    {
+        "name": "tg_purge_messages",
+        "description": (
+            "Xóa hàng loạt các tin nhắn liên tiếp từ message_id đầu đến message_id cuối "
+            "(tối đa 200 tin/lần) trong chat hiện tại. Cần biết cả 2 message_id. "
+            "Chỉ dùng khi chủ nhân yêu cầu rõ ràng. Cần quyền xóa tin nhắn."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "from_message_id": {"type": "NUMBER", "description": "ID tin đầu tiên cần xóa."},
+                "to_message_id":   {"type": "NUMBER", "description": "ID tin cuối cùng cần xóa."},
+            },
+            "required": ["from_message_id", "to_message_id"],
+        },
+    },
+    {
+        "name": "tg_delete_last_n_messages",
+        "description": (
+            "Xóa N tin nhắn gần nhất trong chat hiện tại (tối đa 200, tính từ tin hiện tại trở lui). "
+            "Dùng khi chủ nhân nói 'xóa 20 tin gần nhất', 'dọn 10 tin cuối'."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "count": {"type": "NUMBER", "description": "Số tin cần xóa (1–200)."},
+            },
+            "required": ["count"],
+        },
+    },
+    {
+        "name": "tg_purge_user_messages",
+        "description": (
+            "Xóa các tin nhắn của một thành viên mà bot đã ghi lại trong nhóm hiện tại "
+            "('xóa hết tin của X'). Không xóa được tin bot chưa từng thấy. Chỉ dùng khi chủ nhân yêu cầu rõ ràng."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "user_id": {"type": "STRING", "description": "ID số hoặc @username của thành viên."},
+            },
+            "required": ["user_id"],
+        },
+    },
+])
+
+
+def _purge_summary(res: dict) -> str:
+    import json as _json
+    return _json.dumps(res, ensure_ascii=False)
+
+
+async def tg_purge_messages(ctx: TelegramContext, from_message_id, to_message_id) -> str:
+    try:
+        a, b = int(float(from_message_id)), int(float(to_message_id))
+    except (TypeError, ValueError):
+        return _purge_summary({"ok": False, "error": "from_message_id / to_message_id phải là số."})
+    return _purge_summary(await _purge.purge_range(ctx.bot, ctx.chat_id, a, b, force=False))
+
+
+async def tg_delete_last_n_messages(ctx: TelegramContext, count) -> str:
+    try:
+        n = max(1, min(int(float(count)), _purge.PURGE_CAP))
+    except (TypeError, ValueError):
+        return _purge_summary({"ok": False, "error": "count phải là số (1–200)."})
+    return _purge_summary(await _purge.delete_last_n(ctx.bot, ctx.chat_id, n, ctx.message_id))
+
+
+async def tg_purge_user_messages(ctx: TelegramContext, user_id) -> str:
+    uid = await _resolve_user(ctx, user_id)
+    if uid is None:
+        return _user_not_found_msg(user_id, ctx.lang)
+    if uid == OWNER_ID:
+        return _purge_summary({"ok": False, "error": "Không xóa hàng loạt tin của chính chủ nhân."})
+    return _purge_summary(await _purge.purge_user(ctx.bot, ctx.chat_id, uid))
+
+
+for _n, _f in (("tg_purge_messages", tg_purge_messages),
+               ("tg_delete_last_n_messages", tg_delete_last_n_messages),
+               ("tg_purge_user_messages", tg_purge_user_messages)):
+    TG_HANDLERS[_n] = _f
+    TOOL_STATUS[_n] = f"tool_status.{_n}"

@@ -32,6 +32,9 @@ MODELS: list[str] = [
     "gemini-3-flash-preview",
     "gemini-2.5-flash"
 ]
+DEFAULT_THINKING_LEVEL: str = os.getenv("DEFAULT_THINKING_LEVEL", "medium").lower()  # low | medium | high
+ENABLE_GROUNDING: bool       = os.getenv("ENABLE_GROUNDING", "false").lower() == "true"
+GEMINI_TIMEOUT_SECONDS: int = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "90"))
 
 # ── Search (optional) ─────────────────────────────────────────────────────
 # Tavily (https://tavily.com) — search engine ưu tiên cho web_search().
@@ -50,8 +53,18 @@ MESSAGE_MERGE_DELAY: float = float(os.getenv("MESSAGE_MERGE_DELAY", "1.5"))
 # ── Group Context Mode ────────────────────────────────────────────────────
 # Khi bật: bot đọc VÀ lưu TẤT CẢ tin nhắn trong group vào conv chung
 # (không chỉ tin nhắn của owner), giúp AI có context đầy đủ hơn.
-# conv_id của group = g:{chat_id} (shared toàn group) thay vì g:{chat_id}:u:{uid}
 GROUP_CONTEXT_ENABLED: bool = os.getenv("GROUP_CONTEXT_ENABLED", "true").lower() == "true"
+TZ_OFFSET_HOURS: float      = float(os.getenv("TZ_OFFSET_HOURS", "7"))   # giờ hiển thị (VN = UTC+7)
+AI_CTX_MSGS: int            = int(os.getenv("AI_CTX_MSGS", "30"))
+AI_CTX_CHARS: int           = int(os.getenv("AI_CTX_CHARS", "6000"))
+
+# ── Monitor & Proxy ───────────────────────────────────────────────────────
+TARGET_GROUP_ID: int = int(os.getenv("TARGET_GROUP_ID", "0"))
+MONITOR_MODE: bool   = os.getenv("MONITOR_MODE", "false").lower() == "true"
+PROXY_MODE: bool     = os.getenv("PROXY_MODE", "false").lower() == "true"
+
+# ── Cryptography (Fernet) ─────────────────────────────────────────────────
+ENCRYPTION_KEY: str  = os.getenv("ENCRYPTION_KEY", "")
 
 # ── File Cache (RAM only, NO disk/DB) ─────────────────────────────────────
 # Tổng dung lượng tối đa cho file cache trong RAM. Files được evict LRU

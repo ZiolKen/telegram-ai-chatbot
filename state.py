@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
-from collections import defaultdict, deque
+from collections import defaultdict, deque, OrderedDict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,6 +14,9 @@ import db
 from config import GROUP_CONTEXT_ENABLED, MAX_HISTORY, OWNER_ID
 
 _log = logging.getLogger(__name__)
+
+# ── Bounded in-memory conversation limit ──────────────────────────────────────
+MAX_CACHED_CONVERSATIONS = 1000
 
 # ── Fire-and-forget helper ────────────────────────────────────────────────────
 def _fire(coro) -> None:
@@ -37,7 +40,7 @@ def is_owner(uid: int) -> bool:
     return uid == OWNER_ID
 
 # ── In-memory stores ──────────────────────────────────────────────────────────
-_conversations: dict[str, list[dict]]  = {}
+_conversations: OrderedDict[str, list[dict]] = OrderedDict()
 _topic_mode:    dict[int,  bool]        = {}
 _conv_cfg:      dict[str,  dict]        = {}
 
@@ -64,6 +67,12 @@ def feed_reply_set(chat_id: int, msg_id: int, group_chat_id: int, target_msg_id:
         "target_msg_id": target_msg_id,
         "expires":       now + _FEED_REPLY_TTL,
     }
+
+
+def feed_reply_peek(chat_id: int, msg_id: int) -> bool:
+    import time as _t
+    entry = pending_feed_replies.get((chat_id, msg_id))
+    return bool(entry and _t.monotonic() <= entry["expires"])
 
 
 def feed_reply_pop(chat_id: int, msg_id: int) -> dict | None:
@@ -314,16 +323,33 @@ def conv_id(chat_id: int, user_id: int, thread_id: Optional[int],
 
 
 # ── Conversation history ──────────────────────────────────────────────────────
+async def ensure_history(cid: str) -> None:
+    """Reload a conversation from DB if it was evicted from the RAM LRU."""
+    if cid in _conversations:
+        return
+    rows = await db.conv_load_one(cid, MAX_HISTORY)
+    if rows and cid not in _conversations:
+        _conversations[cid] = rows
+        _conversations.move_to_end(cid)
+
+
 def get_history(cid: str) -> list[dict]:
+    if cid in _conversations:
+        _conversations.move_to_end(cid)
     return list(_conversations.get(cid, []))
 
 
 def _append(cid: str, role: str, text: str) -> None:
-    _conversations.setdefault(cid, []).append(
-        {"role": role, "parts": [{"text": text}]}
-    )
-    if len(_conversations[cid]) > MAX_HISTORY:
-        _conversations[cid] = _conversations[cid][-MAX_HISTORY:]
+    conv = _conversations.setdefault(cid, [])  # callers run ensure_history first
+    conv.append({"role": role, "parts": [{"text": text}]})
+    if len(conv) > MAX_HISTORY:
+        _conversations[cid] = conv[-MAX_HISTORY:]
+    _conversations.move_to_end(cid)
+
+    # Evict least-recently used conversations if exceeding memory cap
+    while len(_conversations) > MAX_CACHED_CONVERSATIONS:
+        _conversations.popitem(last=False)
+
     _fire(db.conv_push(cid, role, text))
 
 

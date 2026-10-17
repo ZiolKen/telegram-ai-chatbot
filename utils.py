@@ -49,6 +49,12 @@ def md_to_html(text: str) -> str:
                 out_parts.append(f"<code>{sub_content}</code>")
             else:
                 t = html.escape(sub_content)
+                # Bảo vệ @username (có thể chứa dấu _) khỏi bị biến thành <i>/<b>
+                _mentions: list[str] = []
+                def _keep(m):
+                    _mentions.append(m.group(0))
+                    return f"\x00M{len(_mentions) - 1}\x00"
+                t = re.sub(r"(?<![\w@])@[A-Za-z0-9_]{3,32}", _keep, t)
                 # Headers → bold
                 t = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", t, flags=re.MULTILINE)
                 # Bold (**text** or __text__)
@@ -56,9 +62,10 @@ def md_to_html(text: str) -> str:
                 t = re.sub(r"__(.+?)__",     r"<b>\1</b>", t, flags=re.DOTALL)
                 # Italic (*text* or _text_) — only when not a list bullet
                 t = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", t)
-                t = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<i>\1</i>", t)
+                t = re.sub(r"(?<![\w_])_(?!_)(.+?)(?<![_\s])_(?![\w_])", r"<i>\1</i>", t)
                 # Bullet points
                 t = re.sub(r"^[-*+]\s+", "• ", t, flags=re.MULTILINE)
+                t = re.sub(r"\x00M(\d+)\x00", lambda m: _mentions[int(m.group(1))], t)
                 out_parts.append(t)
 
     return "".join(out_parts)
